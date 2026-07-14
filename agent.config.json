@@ -1,0 +1,19 @@
+{
+  "agentName": "Pulse",
+  "mode": "single-model",
+  "model": {
+    "provider": "openrouter",
+    "name": "qwen/qwen3-coder",
+    "temperature": 0.2,
+    "maxTokens": 8192
+  },
+  "sandbox": {
+    "workspaceRoot": ".",
+    "requirePermissionForReads": true,
+    "requirePermissionForProjectActions": true,
+    "allowWrites": false
+  },
+  "logging": {
+    "actionLog": ".agent/logs/actions.jsonl"
+  }
+}
