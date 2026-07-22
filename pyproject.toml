@@ -10,10 +10,12 @@ dependencies = [
     "python-dotenv>=1.2.2",
     "rich>=13.9.0",
     "typer>=0.26.8",
+    "websockets>=15.0",
 ]
 
 [project.scripts]
 pulse = "pulse.cli:main"
+pulse-rpc = "pulse.rpc:main"
 
 [tool.uv]
 package = true

@@ -26,6 +26,8 @@ def test_build_runtime_composes_dependencies(tmp_path: Path) -> None:
     assert runtime.agent.name == "TestAgent"
     assert runtime.sandbox.config.workspace_root == tmp_path
     assert runtime.provider.config.name == "test/model"
+    assert runtime.manager is not None
+    assert {tool.name for tool in runtime.tools.discover()} == {"status", "doctor", "mutations", "edit", "rollback", "index", "search", "symbols", "verify", "git", "memory"}
 
 
 def test_build_runtime_uses_configured_provider(tmp_path: Path) -> None:

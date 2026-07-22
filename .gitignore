@@ -39,6 +39,7 @@ pip-wheel-metadata/
 
 # Local data, logs, and editor/OS files
 .agent/logs/
+.agent/repository-index.json
 *.log
 *.sqlite
 *.sqlite3

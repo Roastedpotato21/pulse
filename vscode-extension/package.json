@@ -1,0 +1,42 @@
+{
+  "name": "pulse-vscode",
+  "displayName": "Pulse",
+  "description": "Chat with the local Pulse project agent.",
+  "version": "0.1.0",
+  "engines": { "vscode": "^1.95.0" },
+  "categories": ["Other"],
+  "activationEvents": ["onView:pulse.chat", "onCommand:pulse.openChat"],
+  "main": "./out/extension.js",
+  "contributes": {
+    "configuration": {
+      "title": "Pulse",
+      "properties": {
+        "pulse.serverUrl": {
+          "type": "string",
+          "default": "ws://127.0.0.1:8765",
+          "description": "Local Pulse JSON-RPC WebSocket endpoint."
+        }
+      }
+    },
+    "viewsContainers": {
+      "activitybar": [{ "id": "pulse", "title": "Pulse", "icon": "media/pulse.svg" }]
+    },
+    "views": { "pulse": [{ "type": "webview", "id": "pulse.chat", "name": "Chat" }] },
+    "commands": [
+      { "command": "pulse.openChat", "title": "Pulse: Open Chat" },
+      { "command": "pulse.sendPrompt", "title": "Pulse: Send Prompt" },
+      { "command": "pulse.explainSelection", "title": "Pulse: Explain Selection" },
+      { "command": "pulse.reviewSelection", "title": "Pulse: Review Selection" },
+      { "command": "pulse.verifyWorkspace", "title": "Pulse: Verify Workspace" }
+    ],
+    "menus": {
+      "editor/context": [
+        { "command": "pulse.explainSelection", "when": "editorHasSelection", "group": "navigation@10" },
+        { "command": "pulse.reviewSelection", "when": "editorHasSelection", "group": "navigation@11" }
+      ]
+    }
+  },
+  "scripts": { "compile": "tsc -p .", "watch": "tsc -watch -p ." },
+  "dependencies": { "ws": "^8.18.0" },
+  "devDependencies": { "@types/vscode": "^1.95.0", "@types/ws": "^8.5.12", "typescript": "^5.7.0" }
+}
