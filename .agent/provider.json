@@ -1,0 +1,4 @@
+{
+  "provider": "openrouter",
+  "model": "qwen/qwen3-coder"
+}

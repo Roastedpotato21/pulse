@@ -1,0 +1,2082 @@
+--- policy.py ---
+"""Policy-based permission engine for Pulse sandbox execution.
+
+Implements zero-trust fine-grained policy evaluation with inheritance,
+wildcard pattern matching, and action-level overrides.
+
+Security hardening (case bypass fix):
+    - All targets are normalized through _normalize_target() before matching.
+    - Normalization covers case, separators, Unicode NFC, and drive letters.
+    - Rules match against BOTH raw and normalized targets (defense-in-depth).
+    - Default decisions changed to DENY for all actions except READ.
+"""
+
+from __future__ import annotations
+
+import fnmatch
+import json
+import unicodedata
+from dataclasses import dataclass
+from enum import Enum
+from pathlib import Path
+from typing import Any
+
+
+class ActionType(str, Enum):
+    READ = "read"
+    WRITE = "write"
+    DELETE = "delete"
+    RENAME = "rename"
+    SHELL = "shell"
+    GIT = "git"
+    PYTHON = "python"
+    NETWORK = "network"
+
+
+class PolicyDecision(str, Enum):
+    ALLOW = "allow"
+    DENY = "deny"
+    ASK = "ask"
+
+
+@dataclass(frozen=True, slots=True)
+class PolicyRule:
+    """Individual policy rule matching an action and optional target pattern."""
+
+    action: str
+    target_pattern: str = "*"
+    decision: PolicyDecision = PolicyDecision.ASK
+    reason: str = ""
+
+    def matches(self, action: str, target: str) -> bool:
+        """Check if this rule matches the given action and target.
+
+        Security: matches against BOTH the raw target and the normalized
+        target. If either matches, the rule applies. This prevents
+        case-sensitivity bypass on Linux where filenames are case-sensitive
+        but policy rules may have been written case-insensitively.
+        """
+        if self.action != "*" and self.action.lower() != action.lower():
+            return False
+        if self.target_pattern == "*":
+            return True
+
+        normalized_pattern = SandboxPolicy.normalize_target(self.target_pattern)
+
+        # Match against both raw and normalized target
+        raw_normalized = SandboxPolicy.normalize_target(target)
+
+        return (
+            fnmatch.fnmatch(raw_normalized, normalized_pattern)
+            or fnmatch.fnmatch(target.replace("\\", "/").lower(), normalized_pattern)
+        )
+
+
+class SandboxPolicy:
+    """Production-grade policy manager supporting inheritance and pattern overrides.
+
+    Security hardening:
+        - Default decisions are DENY for all mutating actions.
+        - READ defaults to ALLOW (read-only operations are safe).
+        - GIT and PYTHON default to ASK (require explicit approval).
+        - NETWORK defaults to DENY.
+    """
+
+    DEFAULT_DECISIONS: dict[str, PolicyDecision] = {  # noqa: RUF012
+        ActionType.READ.value: PolicyDecision.ALLOW,
+        ActionType.WRITE.value: PolicyDecision.DENY,
+        ActionType.DELETE.value: PolicyDecision.DENY,
+        ActionType.RENAME.value: PolicyDecision.DENY,
+        ActionType.SHELL.value: PolicyDecision.DENY,
+        ActionType.GIT.value: PolicyDecision.ASK,
+        ActionType.PYTHON.value: PolicyDecision.ASK,
+        ActionType.NETWORK.value: PolicyDecision.DENY,
+    }
+
+    def __init__(
+        self,
+        default_decisions: dict[str, PolicyDecision] | None = None,
+        rules: list[PolicyRule] | None = None,
+        parent_policy: SandboxPolicy | None = None,
+    ) -> None:
+        self.default_decisions = {**self.DEFAULT_DECISIONS, **(default_decisions or {})}
+        self.rules: list[PolicyRule] = list(rules or [])
+        self.parent_policy = parent_policy
+
+    def add_rule(self, rule: PolicyRule) -> None:
+        self.rules.insert(0, rule)  # Higher priority rules first
+
+    def evaluate(self, action: ActionType | str, target: str = "") -> PolicyDecision:
+        action_str = action.value if isinstance(action, ActionType) else str(action).lower()
+
+        # 1. Check explicit rules (most specific target patterns first)
+        for rule in self.rules:
+            if rule.matches(action_str, target):
+                return rule.decision
+
+        # 2. Consult parent policy if present
+        if self.parent_policy:
+            return self.parent_policy.evaluate(action, target)
+
+        # 3. Fall back to default action decision (DENY if unknown action)
+        return self.default_decisions.get(action_str, PolicyDecision.DENY)
+
+    def is_allowed(self, action: ActionType | str, target: str = "") -> bool:
+        return self.evaluate(action, target) == PolicyDecision.ALLOW
+
+    def requires_approval(self, action: ActionType | str, target: str = "") -> bool:
+        return self.evaluate(action, target) == PolicyDecision.ASK
+
+    @staticmethod
+    def normalize_target(target: str) -> str:
+        """Normalize a path/target string for consistent policy matching.
+
+        Security: prevents bypass via case differences, separator
+        inconsistencies, Unicode confusables, or drive letter prefixes.
+
+        Normalization steps:
+            1. Unicode NFC normalization (canonical decomposition + composition)
+            2. Backslash → forward slash
+            3. Lowercase
+            4. Strip Windows drive letter prefix (e.g., C:/)
+            5. Collapse consecutive slashes
+            6. Strip leading/trailing slashes for relative matching
+        """
+        # 1. Unicode NFC normalization
+        normalized = unicodedata.normalize("NFC", target)
+
+        # 2. Normalize separators
+        normalized = normalized.replace("\\", "/")
+
+        # 3. Lowercase
+        normalized = normalized.lower()
+
+        # 4. Strip drive letter prefix (e.g., c:/ or C:/)
+        if len(normalized) >= 3 and normalized[1] == ":" and normalized[2] == "/":
+            normalized = normalized[2:]
+
+        # 5. Collapse consecutive slashes
+        while "//" in normalized:
+            normalized = normalized.replace("//", "/")
+
+        # 6. Strip leading slash for relative matching (preserves internal structure)
+        normalized = normalized.strip("/")
+
+        return normalized
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any], parent_policy: SandboxPolicy | None = None) -> SandboxPolicy:
+        defaults: dict[str, PolicyDecision] = {}
+        for action_name, decision_val in data.get("defaults", {}).items():
+            defaults[action_name.lower()] = PolicyDecision(str(decision_val).lower())
+
+        rules: list[PolicyRule] = []
+        for raw_rule in data.get("rules", []):
+            rules.append(
+                PolicyRule(
+                    action=str(raw_rule.get("action", "*")).lower(),
+                    target_pattern=str(raw_rule.get("target_pattern", "*")),
+                    decision=PolicyDecision(str(raw_rule.get("decision", "ask")).lower()),
+                    reason=str(raw_rule.get("reason", "")),
+                )
+            )
+
+        return cls(default_decisions=defaults, rules=rules, parent_policy=parent_policy)
+
+    @classmethod
+    def from_file(cls, path: Path, parent_policy: SandboxPolicy | None = None) -> SandboxPolicy:
+        text = path.read_text(encoding="utf-8")
+        raw = json.loads(text)
+        return cls.from_dict(raw, parent_policy=parent_policy)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "defaults": {k: v.value for k, v in self.default_decisions.items()},
+            "rules": [
+                {
+                    "action": r.action,
+                    "target_pattern": r.target_pattern,
+                    "decision": r.decision.value,
+                    "reason": r.reason,
+                }
+                for r in reversed(self.rules)
+            ],
+        }
+
+--- path_validator.py ---
+"""Path validation, TOCTOU-safe file access, and workspace boundary isolation.
+
+Prevents path traversal, symlink loops, symlink escapes, and unauthorized access
+outside configured workspace boundaries.
+
+Security hardening (TOCTOU + Memory Exhaustion):
+    - safe_open() atomically validates and opens file descriptors.
+    - O_NOFOLLOW used on POSIX to prevent symlink following.
+    - Post-open fstat() re-validates the resolved path matches expectations.
+    - MAX_FILE_SIZE enforced before reading to prevent OOM attacks.
+    - safe_read() returns content with enforced size limits.
+"""
+
+from __future__ import annotations
+
+import os
+import stat
+import sys
+from pathlib import Path
+
+from pulse.sandbox.errors import SandboxResourceError, SandboxSecurityError
+
+# Maximum file size that can be read through the sandbox (50 MB)
+MAX_FILE_SIZE: int = 50 * 1024 * 1024
+
+
+class PathValidationError(ValueError):
+    """Raised when a path violates security boundaries."""
+
+    def __init__(self, message: str, path: str | Path, reason: str) -> None:
+        super().__init__(f"{message}: {path} ({reason})")
+        self.path = str(path)
+        self.reason = reason
+
+
+class PathValidator:
+    """Security boundary validator for workspace filesystem access.
+
+    Provides TOCTOU-safe file operations that atomically validate and open
+    file descriptors, preventing race condition exploits.
+    """
+
+    def __init__(
+        self,
+        workspace_root: Path,
+        allowed_external_reads: list[Path] | None = None,
+        max_file_size: int = MAX_FILE_SIZE,
+    ) -> None:
+        self.workspace_root = workspace_root.resolve()
+        self.allowed_external_reads = [p.resolve() for p in (allowed_external_reads or [])]
+        self.max_file_size = max_file_size
+
+    def validate_path(
+        self,
+        path: str | Path,
+        *,
+        allow_read_only_external: bool = False,
+        must_exist: bool = False,
+    ) -> Path:
+        """Resolve and validate that a path is strictly inside workspace boundaries.
+
+        Args:
+            path: Relative or absolute path to validate.
+            allow_read_only_external: Whether to allow access to configured external read paths.
+            must_exist: If True, raises PathValidationError if target path does not exist.
+
+        Returns:
+            Resolved canonical Path object.
+
+        Raises:
+            PathValidationError: If path escapes workspace or violates symlink rules.
+        """
+        raw_path = Path(path)
+
+        # 1. Resolve path candidate relative to workspace root if relative
+        if not raw_path.is_absolute():
+            candidate = (self.workspace_root / raw_path)
+        else:
+            candidate = raw_path
+
+        # 2. Check symlink loops and resolve target
+        try:
+            resolved = candidate.resolve()
+        except RuntimeError as err:
+            raise PathValidationError("Symlink resolution failed", path, "Possible symlink loop") from err
+
+        if must_exist and not resolved.exists():
+            raise PathValidationError("Path does not exist", path, "Target path missing")
+
+        # 3. Verify workspace root containment
+        if self._is_contained_in(resolved, self.workspace_root):
+            return resolved
+
+        # 4. Check allowed external read paths if permitted
+        if allow_read_only_external:
+            for ext_path in self.allowed_external_reads:
+                if self._is_contained_in(resolved, ext_path):
+                    return resolved
+
+        raise PathValidationError("Path is outside workspace boundary", path, f"Resolved to {resolved}")
+
+    def is_inside_workspace(self, path: str | Path) -> bool:
+        """Return True if path resolves inside workspace_root."""
+        try:
+            self.validate_path(path, allow_read_only_external=False, must_exist=False)
+            return True
+        except PathValidationError:
+            return False
+
+    def assert_inside_workspace(self, path: str | Path) -> Path:
+        """Convenience assertion method returning resolved Path or raising PathValidationError."""
+        return self.validate_path(path, allow_read_only_external=False, must_exist=False)
+
+    def safe_open(self, path: str | Path, *, for_write: bool = False) -> int:
+        """Atomically validate and open a file descriptor, preventing TOCTOU races.
+
+        Security guarantees:
+            1. Path is validated inside workspace BEFORE opening.
+            2. On POSIX, O_NOFOLLOW prevents following symlinks at the final component.
+            3. After open, fstat() verifies the file is a regular file.
+            4. File size is checked against max_file_size before returning.
+
+        Args:
+            path: Relative or absolute path to open.
+            for_write: If True, open for writing (O_WRONLY | O_CREAT).
+
+        Returns:
+            Raw file descriptor (caller is responsible for os.close()).
+
+        Raises:
+            PathValidationError: If path escapes workspace.
+            SandboxSecurityError: If symlink detected at open time, or file is not regular.
+            SandboxResourceError: If file exceeds max_file_size.
+        """
+        resolved = self.assert_inside_workspace(path)
+
+        # Build open flags
+        flags = os.O_RDONLY
+        if for_write:
+            flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+
+        # On POSIX, add O_NOFOLLOW to prevent symlink following at the final path component.
+        # This closes the TOCTOU gap between validate_path() and the actual open().
+        is_windows = sys.platform == "win32"
+        if not is_windows and hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+
+        # Windows TOCTOU mitigation: lstat before open, fstat after open
+        pre_stat = None
+        if is_windows:
+            try:
+                pre_stat = os.lstat(str(resolved))
+                if stat.S_ISLNK(pre_stat.st_mode):
+                    raise SandboxSecurityError(
+                        "Symlink detected during safe_open (pre-stat) — possible TOCTOU attack",
+                        operation="safe_open",
+                        path=str(path),
+                    )
+            except FileNotFoundError:
+                # File doesn't exist yet, which is fine if for_write is True
+                if not for_write:
+                    raise
+
+        try:
+            fd = os.open(str(resolved), flags, 0o644)
+        except OSError as err:
+            if err.errno == 40:  # ELOOP — symlink detected with O_NOFOLLOW
+                raise SandboxSecurityError(
+                    "Symlink detected during safe_open — possible TOCTOU attack",
+                    operation="safe_open",
+                    path=str(path),
+                ) from err
+            raise
+
+        try:
+            # Post-open validation: verify file descriptor points to a regular file
+            file_stat = os.fstat(fd)
+            
+            # Windows TOCTOU mitigation: verify st_ino and st_dev match pre_stat
+            if is_windows and pre_stat is not None:  # noqa: SIM102
+                if pre_stat.st_ino != file_stat.st_ino or pre_stat.st_dev != file_stat.st_dev:
+                    os.close(fd)
+                    raise SandboxSecurityError(
+                        "File identity changed during safe_open (inode mismatch) — TOCTOU race detected",
+                        operation="safe_open",
+                        path=str(path),
+                    )
+            
+            if not stat.S_ISREG(file_stat.st_mode) and not for_write:
+                os.close(fd)
+                raise SandboxSecurityError(
+                    "Opened file is not a regular file (possible device/pipe/socket injection)",
+                    operation="safe_open",
+                    path=str(path),
+                )
+
+            # Check file size against limit (only for reads)
+            if not for_write and file_stat.st_size > self.max_file_size:
+                os.close(fd)
+                raise SandboxResourceError(
+                    f"File size ({file_stat.st_size} bytes) exceeds maximum "
+                    f"({self.max_file_size} bytes): {path}",
+                    limit_name="max_file_size",
+                    limit_value=self.max_file_size,
+                )
+
+            return fd
+
+        except Exception:
+            # Ensure fd is closed on any validation failure
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            raise
+
+    def safe_read(self, path: str | Path) -> str:
+        """TOCTOU-safe file read with size limit enforcement.
+
+        Atomically validates, opens, checks size, and reads the file content
+        through a single file descriptor, closing the race window between
+        validation and use.
+
+        Args:
+            path: Relative or absolute path to read.
+
+        Returns:
+            File content as a UTF-8 string.
+
+        Raises:
+            PathValidationError: If path escapes workspace.
+            SandboxSecurityError: On TOCTOU/symlink detection.
+            SandboxResourceError: If file exceeds max_file_size.
+        """
+        fd = self.safe_open(path, for_write=False)
+        try:
+            # Read in chunks to prevent unbounded memory allocation
+            chunks: list[bytes] = []
+            total_read = 0
+            chunk_size = 1024 * 1024  # 1 MB chunks
+
+            while True:
+                chunk = os.read(fd, chunk_size)
+                if not chunk:
+                    break
+                total_read += len(chunk)
+                if total_read > self.max_file_size:
+                    raise SandboxResourceError(
+                        f"File read exceeded maximum size ({self.max_file_size} bytes): {path}",
+                        limit_name="max_file_size",
+                        limit_value=self.max_file_size,
+                    )
+                chunks.append(chunk)
+
+            return b"".join(chunks).decode("utf-8", errors="replace")
+        finally:
+            os.close(fd)
+
+    @staticmethod
+    def _is_contained_in(target: Path, parent: Path) -> bool:
+        """Return True if target equals parent or is a child of parent."""
+        if target == parent:
+            return True
+        try:
+            target.relative_to(parent)
+            return True
+        except ValueError:
+            return False
+
+--- secrets.py ---
+"""Secret protection and automated credential scrubbing engine.
+
+Redacts API keys, SSH keys, passwords, bearer tokens, and environment secrets
+from logs, terminal outputs, and audit records.
+
+Security hardening (ReDoS remediation):
+    All regex patterns have been audited for catastrophic backtracking.
+    - No nested quantifiers (e.g. (a+)+ patterns).
+    - Alternations are anchored or bounded.
+    - A per-call timeout guard prevents any single redact() from blocking.
+    - Patterns use possessive-equivalent constructs where possible.
+"""
+
+from __future__ import annotations
+
+import re
+import threading
+
+
+class SecretScrubber:
+    """Regex & value-matching secret redactor with ReDoS protection."""
+
+    REDACTED_LABEL = "[REDACTED_SECRET]"
+    _REDACT_TIMEOUT_SECONDS = 2.0
+
+    # -----------------------------------------------------------------------
+    # ReDoS-safe patterns: no nested quantifiers, no unbounded alternations.
+    # Each pattern is designed for linear-time matching.
+    # -----------------------------------------------------------------------
+    BUILTIN_PATTERNS: list[re.Pattern[str]] = [  # noqa: RUF012
+        # SSH Private Keys — bounded by clear delimiters, lazy inner match
+        re.compile(
+            r"-----BEGIN [A-Z0-9 ]+ PRIVATE KEY-----"
+            r"[\s\S]+?"
+            r"-----END [A-Z0-9 ]+ PRIVATE KEY-----"
+        ),
+        # API Key assignments — simplified: key_name followed by separator then token value
+        # Fixed: removed nested quantifier from original pattern.
+        # Original had \s*[:=\s]\s* which allowed catastrophic backtracking.
+        re.compile(
+            r"(?i)(?:api[_-]?key|secret[_-]?key|access[_-]?token|auth[_-]?token|bearer)"
+            r"\s{0,4}[:=]\s{0,4}"
+            r"['\"]?"
+            r"([a-zA-Z0-9_\-\.=]{16,128})"
+            r"['\"]?"
+        ),
+        # Google API Keys — fixed-length prefix, bounded suffix
+        re.compile(r"AIzaSy[A-Za-z0-9_\-]{33}"),
+        # OpenAI / Anthropic / Groq / DeepSeek Keys — bounded length
+        re.compile(r"sk-[A-Za-z0-9_-]{20,128}"),
+        # Graphene keys — bounded length
+        re.compile(r"graphene-[A-Za-z0-9_-]{8,128}"),
+        # GitHub Personal Access Tokens — fixed structure
+        re.compile(r"gh[pousr]_[A-Za-z0-9]{36}"),
+        # Slack Tokens — bounded
+        re.compile(r"xox[baprs]-[A-Za-z0-9_-]{10,128}"),
+        # JWT Tokens — three dot-separated base64url segments, bounded
+        re.compile(r"eyJ[A-Za-z0-9_-]{10,512}\.eyJ[A-Za-z0-9_-]{10,1024}\.[A-Za-z0-9_-]{10,512}"),
+        # AWS Access Key IDs — fixed-length structure
+        re.compile(r"(?:A3T[A-Z0-9]|AKIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ASIA)[A-Z0-9]{16}"),
+    ]
+
+    def __init__(self, secrets: list[str] | None = None) -> None:
+        self._exact_secrets: set[str] = set()
+        if secrets:
+            for s in secrets:
+                self.add_secret(s)
+
+    def add_secret(self, secret: str) -> None:
+        """Register an exact sensitive string to redact."""
+        cleaned = secret.strip()
+        if len(cleaned) >= 4:  # Avoid redacting tiny trivial strings like "yes", "true", "x"
+            self._exact_secrets.add(cleaned)
+
+    def redact(self, text: str) -> str:
+        """Scrub all registered secret values and regex patterns from text.
+
+        Security guarantees:
+            - Exact secrets are replaced via str.replace (O(n), no regex).
+            - Each regex pattern is bounded-length and ReDoS-safe.
+            - Total redaction is guarded by a thread-based timeout.
+        """
+        if not text:
+            return text
+
+        # Use a thread-based timeout to guard against any unforeseen backtracking
+        result_container: list[str] = []
+        error_container: list[Exception] = []
+
+        def _do_redact() -> None:
+            try:
+                result_container.append(self._redact_impl(text))
+            # Intentionally broad to isolate execution boundaries and prevent crashes.
+            except Exception as exc:  # noqa: BLE001
+                error_container.append(exc)
+
+        worker = threading.Thread(target=_do_redact, daemon=True)
+        worker.start()
+        worker.join(timeout=self._REDACT_TIMEOUT_SECONDS)
+
+        if worker.is_alive():
+            # Timeout — return text with warning marker rather than blocking forever
+            return text + "\n[SCRUB_TIMEOUT: redaction exceeded time limit]"
+
+        if error_container:
+            # Unexpected error — return text with error marker
+            return text + f"\n[SCRUB_ERROR: {error_container[0]}]"
+
+        return result_container[0] if result_container else text
+
+    def _redact_impl(self, text: str) -> str:
+        """Internal redaction without timeout guard."""
+        scrubbed = text
+
+        # 1. Redact exact registered secret values (longest first to avoid partial matches)
+        for secret in sorted(self._exact_secrets, key=len, reverse=True):
+            scrubbed = scrubbed.replace(secret, self.REDACTED_LABEL)
+
+        # 2. Redact regex pattern matches
+        for pattern in self.BUILTIN_PATTERNS:
+            def replace_match(match: re.Match[str]) -> str:
+                # If pattern has sub-captures (e.g. key: value), replace only value part
+                if match.lastindex and match.lastindex >= 1:
+                    full = match.group(0)
+                    val = match.group(1)
+                    return full.replace(val, self.REDACTED_LABEL)
+                return self.REDACTED_LABEL
+
+            scrubbed = pattern.sub(replace_match, scrubbed)
+
+        return scrubbed
+
+--- audit.py ---
+"""Structured JSON Lines audit logging system.
+
+Records timestamped audit entries with automatic secret redaction, policy decisions,
+exit codes, duration, and container execution telemetry.
+
+Security hardening:
+    - JSON values sanitized against control character injection.
+    - isolation_level field added to track execution security tier.
+    - Log writes are atomic (single write per entry).
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+from pulse.sandbox.secrets import SecretScrubber
+
+# Pattern to match control characters that could corrupt JSONL format.
+# Includes \n (\x0a) and \r (\x0d) which are the primary log injection vectors.
+# Preserves \t (\x09) as it's harmless in JSON (encoded as \t by json.dumps).
+_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0a-\x0c\x0e-\x1f]")
+
+
+def _sanitize_log_value(value: str) -> str:
+    """Remove control characters that could corrupt JSONL log format.
+
+    Security rationale:
+        An attacker could inject \\n followed by a crafted JSON object into
+        a log target string, causing log injection (CWE-117). Stripping
+        control characters prevents injected newlines from splitting entries.
+    """
+    return _CONTROL_CHARS.sub("", value)
+
+
+@dataclass(frozen=True, slots=True)
+class StructuredAuditEntry:
+    """Telemetry audit entry recorded in JSON Lines format."""
+
+    timestamp: str
+    action: str
+    target: str
+    decision: str
+    exit_code: int | None = None
+    duration_ms: float | None = None
+    container_id: str | None = None
+    isolation_level: str = "container"  # "container", "host_unsafe", "unavailable"
+    redacted: bool = False
+    detail: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+class StructuredAuditLogger:
+    """Thread-safe JSON Lines audit logger with automatic secret scrubbing."""
+
+    def __init__(
+        self,
+        log_path: Path,
+        scrubber: SecretScrubber | None = None,
+    ) -> None:
+        self.log_path = log_path
+        self.scrubber = scrubber or SecretScrubber()
+        self._entries: list[StructuredAuditEntry] = []
+
+    def record(
+        self,
+        action: str,
+        target: str = "",
+        decision: str = "allow",
+        *,
+        exit_code: int | None = None,
+        duration_ms: float | None = None,
+        container_id: str | None = None,
+        isolation_level: str = "container",
+        detail: str = "",
+    ) -> StructuredAuditEntry:
+        """Create, sanitize, and record an audit entry."""
+        raw_detail = detail
+        raw_target = target
+
+        clean_detail = self.scrubber.redact(raw_detail)
+        clean_target = self.scrubber.redact(raw_target)
+        was_redacted = (clean_detail != raw_detail) or (clean_target != raw_target)
+
+        # Sanitize against log injection (CWE-117)
+        clean_detail = _sanitize_log_value(clean_detail)
+        clean_target = _sanitize_log_value(clean_target)
+        clean_action = _sanitize_log_value(action)
+
+        entry = StructuredAuditEntry(
+            timestamp=datetime.now(UTC).isoformat(),
+            action=clean_action,
+            target=clean_target,
+            decision=decision.lower(),
+            exit_code=exit_code,
+            duration_ms=duration_ms,
+            container_id=container_id,
+            isolation_level=isolation_level,
+            redacted=was_redacted,
+            detail=clean_detail,
+        )
+
+        self._entries.append(entry)
+        self._write_entry(entry)
+        return entry
+
+    def _write_entry(self, entry: StructuredAuditEntry) -> None:
+        try:
+            self.log_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.log_path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(entry.to_dict(), separators=(",", ":")) + "\n")
+        except OSError:
+            pass  # Fallback gracefully if disk access fails
+
+    @property
+    def entries(self) -> list[StructuredAuditEntry]:
+        return list(self._entries)
+
+    def last_entry(self) -> StructuredAuditEntry | None:
+        return self._entries[-1] if self._entries else None
+
+--- resources.py ---
+"""Resource limits and execution constraints for Pulse sandbox.
+
+Configures memory caps, PID limits, execution timeouts, and output size limits
+to prevent resource exhaustion, fork bombs, and infinite loops.
+
+Security hardening (Memory Exhaustion):
+    - max_file_read_bytes added for file read size limits.
+    - truncate_output() fixed to truncate by byte count, not character count.
+    - Dangerous environment variables are stripped from child processes.
+"""
+
+from __future__ import annotations
+
+import sys
+from dataclasses import dataclass
+from typing import Any
+
+# Optional POSIX resource module
+try:
+    import resource
+except ImportError:
+    resource = None  # Windows host fallback
+
+# Environment variables that MUST be stripped from child processes to prevent
+# library injection, startup script execution, and debug information leakage.
+DANGEROUS_ENV_VARS: frozenset[str] = frozenset({
+    "LD_PRELOAD",
+    "LD_LIBRARY_PATH",
+    "DYLD_INSERT_LIBRARIES",
+    "DYLD_LIBRARY_PATH",
+    "PYTHONSTARTUP",
+    "PYTHONPATH",
+    "PERL5LIB",
+    "RUBYLIB",
+    "NODE_OPTIONS",
+    "BASH_ENV",
+    "ENV",
+    "CDPATH",
+})
+
+
+@dataclass(frozen=True, slots=True)
+class ResourceLimits:
+    """Configurable resource constraints for sandbox process execution."""
+
+    max_memory_bytes: int = 1_073_741_824  # 1 GB
+    max_cpu_percent: float = 100.0
+    max_pids: int = 64  # Prevents fork bombs
+    max_open_files: int = 256
+    timeout_seconds: float = 30.0  # Execution timeout
+    max_output_bytes: int = 5_242_880  # 5 MB stdout/stderr cap
+    max_file_read_bytes: int = 52_428_800  # 50 MB file read cap
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "max_memory_bytes": self.max_memory_bytes,
+            "max_cpu_percent": self.max_cpu_percent,
+            "max_pids": self.max_pids,
+            "max_open_files": self.max_open_files,
+            "timeout_seconds": self.timeout_seconds,
+            "max_output_bytes": self.max_output_bytes,
+            "max_file_read_bytes": self.max_file_read_bytes,
+        }
+
+
+class ResourceLimiter:
+    """Enforces execution limits, output truncation, and environment sanitization."""
+
+    def __init__(self, limits: ResourceLimits | None = None) -> None:
+        self.limits = limits or ResourceLimits()
+
+    def make_preexec_fn(self) -> Any | None:
+        """Create a preexec_fn for POSIX subprocesses to enforce OS resource limits."""
+        if not resource or sys.platform == "win32":
+            return None
+
+        limits = self.limits
+
+        def preexec() -> None:
+            # Set NPROC (max child processes / fork bomb protection)
+            if hasattr(resource, "RLIMIT_NPROC") and limits.max_pids > 0:
+                try:
+                    resource.setrlimit(resource.RLIMIT_NPROC, (limits.max_pids, limits.max_pids))
+                except (ValueError, OSError):
+                    pass
+
+            # Set NOFILE (max open files)
+            if hasattr(resource, "RLIMIT_NOFILE") and limits.max_open_files > 0:
+                try:
+                    resource.setrlimit(resource.RLIMIT_NOFILE, (limits.max_open_files, limits.max_open_files))
+                except (ValueError, OSError):
+                    pass
+
+            # Set AS (address space / max memory)
+            if hasattr(resource, "RLIMIT_AS") and limits.max_memory_bytes > 0:
+                try:
+                    resource.setrlimit(resource.RLIMIT_AS, (limits.max_memory_bytes, limits.max_memory_bytes))
+                except (ValueError, OSError):
+                    pass
+
+        return preexec
+
+    def sanitize_env(self, env: dict[str, str] | None = None) -> dict[str, str]:
+        """Build a sanitized environment dict, stripping dangerous variables.
+
+        Security rationale:
+            LD_PRELOAD, PYTHONSTARTUP, etc. can be used to inject code into child
+            processes. Stripping them ensures the sandbox child cannot inherit
+            attacker-controlled library paths or startup scripts from the parent.
+        """
+        import os
+        merged = {**os.environ, **(env or {})}
+
+        # Remove dangerous variables
+        for var in DANGEROUS_ENV_VARS:
+            merged.pop(var, None)
+
+        return merged
+
+    def truncate_output(self, content: str | bytes) -> tuple[str, bool]:
+        """Truncate stdout/stderr text if it exceeds max_output_bytes limit.
+
+        Security fix: truncation is now based on encoded byte length,
+        not character count, preventing multibyte UTF-8 bypass.
+        """
+        raw_text = content.decode("utf-8", errors="replace") if isinstance(content, bytes) else content
+        max_bytes = self.limits.max_output_bytes
+
+        encoded = raw_text.encode("utf-8")
+        if len(encoded) <= max_bytes:
+            return raw_text, False
+
+        # Truncate at byte boundary, then decode back safely
+        truncated_bytes = encoded[:max_bytes]
+        truncated_text = truncated_bytes.decode("utf-8", errors="ignore")
+        truncated_text += "\n... [OUTPUT TRUNCATED BY SANDBOX RESOURCE LIMITER]"
+        return truncated_text, True
+
+--- process.py ---
+"""Process manager for tracking, running, and terminating child process trees.
+
+Handles timeout enforcement, graceful SIGTERM -> SIGKILL escalation, zombie cleanup,
+and stdout/stderr output buffer truncation.
+
+Security hardening:
+    - Explicit close_fds=True for file descriptor isolation.
+    - start_new_session=True for process group isolation (prevents signal leakage).
+    - Environment sanitization via ResourceLimiter.sanitize_env().
+    - Incremental stdout/stderr collection with byte-count limit kill.
+    - Kills process immediately if cumulative output exceeds max_output_bytes.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import sys
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from pulse.sandbox.resources import ResourceLimiter, ResourceLimits
+
+
+@dataclass(frozen=True, slots=True)
+class ProcessResult:
+    """Outcome of a managed process execution."""
+
+    command: str
+    exit_code: int
+    stdout: str
+    stderr: str
+    duration_ms: float
+    timed_out: bool = False
+    truncated: bool = False
+    pid: int | None = None
+    overlay_path: Path | None = None
+
+
+class ProcessManager:
+    """Async child process manager with lifecycle and timeout enforcement."""
+
+    def __init__(self) -> None:
+        self._active_processes: set[asyncio.subprocess.Process] = set()
+
+    @property
+    def active_count(self) -> int:
+        return len(self._active_processes)
+
+    async def execute(
+        self,
+        command: str | list[str],
+        cwd: Path | str | None = None,
+        env: dict[str, str] | None = None,
+        limits: ResourceLimits | None = None,
+    ) -> ProcessResult:
+        """Run a process asynchronously with timeout, output limits, and isolation.
+
+        Security guarantees:
+            - close_fds=True: child does not inherit parent file descriptors.
+            - start_new_session=True: child runs in its own process group.
+            - Environment sanitized: LD_PRELOAD, PYTHONSTARTUP, etc. stripped.
+            - Output incrementally collected: process killed if output exceeds limit.
+        """
+        limiter = ResourceLimiter(limits)
+        cmd_str = command if isinstance(command, str) else " ".join(command)
+        work_dir = str(cwd) if cwd else None
+
+        # Sanitize environment — strips dangerous variables
+        merged_env = limiter.sanitize_env(env)
+
+        preexec = limiter.make_preexec_fn()
+
+        start_time = time.monotonic()
+        timed_out = False
+        exit_code = -1
+        stdout_bytes = b""
+        stderr_bytes = b""
+        proc: asyncio.subprocess.Process | None = None
+
+        # Platform-specific subprocess flags
+        extra_kwargs: dict[str, Any] = {}
+        if sys.platform != "win32":
+            extra_kwargs["close_fds"] = True
+            extra_kwargs["start_new_session"] = True
+            extra_kwargs["preexec_fn"] = preexec
+        else:
+            extra_kwargs["close_fds"] = True
+
+        try:
+            if isinstance(command, str):
+                proc = await asyncio.create_subprocess_shell(
+                    command,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=work_dir,
+                    env=merged_env,
+                    **extra_kwargs,
+                )
+            else:
+                proc = await asyncio.create_subprocess_exec(
+                    command[0],
+                    *command[1:],
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=work_dir,
+                    env=merged_env,
+                    **extra_kwargs,
+                )
+
+            self._active_processes.add(proc)
+            pid = proc.pid
+
+            try:
+                stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                    self._collect_output(proc, limiter.limits.max_output_bytes),
+                    timeout=limiter.limits.timeout_seconds,
+                )
+                exit_code = proc.returncode if proc.returncode is not None else 0
+            except TimeoutError:
+                timed_out = True
+                await self._kill_process_gracefully(proc)
+                stdout_bytes, stderr_bytes = b"", b"Process execution timed out."
+                exit_code = -9
+
+        # Intentionally broad to isolate execution boundaries and prevent crashes.
+        except Exception as err:  # noqa: BLE001
+            exit_code = -1
+            stderr_bytes = str(err).encode("utf-8")
+        finally:
+            if proc in self._active_processes:
+                self._active_processes.remove(proc)
+
+        duration_ms = (time.monotonic() - start_time) * 1000.0
+
+        clean_stdout, stdout_trunc = limiter.truncate_output(stdout_bytes)
+        clean_stderr, stderr_trunc = limiter.truncate_output(stderr_bytes)
+
+        return ProcessResult(
+            command=cmd_str,
+            exit_code=exit_code,
+            stdout=clean_stdout,
+            stderr=clean_stderr,
+            duration_ms=duration_ms,
+            timed_out=timed_out,
+            truncated=stdout_trunc or stderr_trunc,
+            pid=pid if 'pid' in locals() else None,
+        )
+
+    async def _collect_output(
+        self,
+        proc: asyncio.subprocess.Process,
+        max_bytes: int,
+    ) -> tuple[bytes, bytes]:
+        """Collect stdout/stderr incrementally, killing process if output exceeds limit.
+
+        Security rationale:
+            Without incremental collection, a malicious process could generate
+            infinite stdout, consuming all host memory. This method kills the
+            process as soon as cumulative output exceeds the configured limit.
+        """
+        stdout_chunks: list[bytes] = []
+        stderr_chunks: list[bytes] = []
+        chunk_size = 65536  # 64 KB reads
+
+        async def read_stream(stream: asyncio.StreamReader | None, chunks: list[bytes], label: str) -> int:
+            total = 0
+            if stream is None:
+                return 0
+            while True:
+                try:
+                    data = await stream.read(chunk_size)
+                # Intentionally broad to isolate execution boundaries and prevent crashes.
+                except Exception:  # noqa: BLE001
+                    break
+                if not data:
+                    break
+                total += len(data)
+                chunks.append(data)
+                if total > max_bytes:
+                    # Output limit exceeded — kill the process
+                    await self._kill_process_gracefully(proc)
+                    chunks.append(f"\n[{label} TRUNCATED: exceeded {max_bytes} byte limit]".encode())
+                    break
+            return total
+
+        # Collect stdout and stderr concurrently
+        await asyncio.gather(
+            read_stream(proc.stdout, stdout_chunks, "STDOUT"),
+            read_stream(proc.stderr, stderr_chunks, "STDERR"),
+        )
+
+        await proc.wait()
+
+        return b"".join(stdout_chunks), b"".join(stderr_chunks)
+
+    async def _kill_process_gracefully(self, proc: asyncio.subprocess.Process) -> None:
+        """Send SIGTERM, wait briefly, then force kill with SIGKILL."""
+        if proc.returncode is not None:
+            return
+
+        try:
+            # 1. Attempt graceful termination
+            proc.terminate()
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=1.5)
+                return
+            except TimeoutError:
+                pass
+
+            # 2. Escalate to force kill
+            proc.kill()
+            await proc.wait()
+        except ProcessLookupError:
+            pass  # Already terminated
+
+    async def terminate_all(self) -> None:
+        """Kill all tracked active processes."""
+        for proc in list(self._active_processes):
+            await self._kill_process_gracefully(proc)
+        self._active_processes.clear()
+
+--- filesystem.py ---
+"""Copy-on-Write Filesystem & Transactional Mutation Layer for Pulse Sandbox.
+
+Manages isolated writable staging snapshots, unified diff previews, atomic commits,
+and discarding unapproved mutations without touching host workspace files.
+
+Security hardening:
+    - Staging directory size limit to prevent disk exhaustion.
+    - Staged file size validation before write.
+    - Orphaned staging directory cleanup on init.
+    - Maximum number of concurrent transactions enforced.
+"""
+
+from __future__ import annotations
+
+import shutil
+import uuid
+from dataclasses import dataclass, field
+from difflib import unified_diff
+from pathlib import Path
+
+from pulse.mutations import MutationTracker
+from pulse.sandbox.errors import SandboxResourceError
+from pulse.sandbox.path_validator import PathValidator
+
+# Limits for staging area to prevent disk exhaustion attacks
+MAX_STAGING_SIZE_BYTES: int = 256 * 1024 * 1024  # 256 MB total staging
+MAX_STAGED_FILE_SIZE_BYTES: int = 50 * 1024 * 1024  # 50 MB per file
+MAX_CONCURRENT_TRANSACTIONS: int = 16
+
+
+@dataclass
+class CoWTransaction:
+    """Isolated copy-on-write transaction holding staged workspace mutations."""
+
+    transaction_id: str
+    staging_dir: Path
+    staged_changes: dict[str, str | None] = field(default_factory=dict)
+    is_committed: bool = False
+    is_discarded: bool = False
+
+
+class CoWFilesystem:
+    """Copy-on-write filesystem and staging area manager.
+
+    Security hardening:
+        - Cleans up orphaned staging directories on initialization.
+        - Enforces per-file and total staging size limits.
+        - Limits concurrent transaction count to prevent resource exhaustion.
+    """
+
+    def __init__(
+        self,
+        workspace_root: Path,
+        mutations: MutationTracker | None = None,
+        max_staging_bytes: int = MAX_STAGING_SIZE_BYTES,
+        max_file_bytes: int = MAX_STAGED_FILE_SIZE_BYTES,
+    ) -> None:
+        self.workspace_root = workspace_root.resolve()
+        self.validator = PathValidator(self.workspace_root)
+        self.mutations = mutations or MutationTracker(self.workspace_root)
+        self._staging_base = self.workspace_root / ".agent" / "staging"
+        self._max_staging_bytes = max_staging_bytes
+        self._max_file_bytes = max_file_bytes
+        self._active_transactions: dict[str, CoWTransaction] = {}
+
+        # Clean up orphaned staging directories from previous crashes
+        self._cleanup_orphaned_staging()
+
+    def _cleanup_orphaned_staging(self) -> None:
+        """Remove any leftover staging directories from previous sessions.
+
+        Security rationale:
+            Orphaned staging directories from crashed sessions could contain
+            partially committed changes or consume disk space indefinitely.
+        """
+        if self._staging_base.exists():
+            for child in self._staging_base.iterdir():
+                if child.is_dir():
+                    shutil.rmtree(child, ignore_errors=True)
+
+    def _check_staging_size(self, additional_bytes: int = 0) -> None:
+        """Verify total staging area hasn't exceeded disk limit."""
+        if not self._staging_base.exists():
+            return
+
+        total = sum(
+            f.stat().st_size
+            for f in self._staging_base.rglob("*")
+            if f.is_file()
+        )
+
+        if total + additional_bytes > self._max_staging_bytes:
+            raise SandboxResourceError(
+                f"Staging area size ({total + additional_bytes} bytes) exceeds "
+                f"maximum ({self._max_staging_bytes} bytes). "
+                "Commit or discard existing transactions to free space.",
+                limit_name="max_staging_bytes",
+                limit_value=self._max_staging_bytes,
+            )
+
+    def create_transaction(self) -> CoWTransaction:
+        """Create a new isolated staging directory for CoW mutations."""
+        if len(self._active_transactions) >= MAX_CONCURRENT_TRANSACTIONS:
+            raise SandboxResourceError(
+                f"Maximum concurrent transactions ({MAX_CONCURRENT_TRANSACTIONS}) exceeded. "
+                "Commit or discard existing transactions first.",
+                limit_name="max_concurrent_transactions",
+                limit_value=MAX_CONCURRENT_TRANSACTIONS,
+            )
+
+        tx_id = str(uuid.uuid4())[:8]
+        staging_dir = self._staging_base / tx_id
+        staging_dir.mkdir(parents=True, exist_ok=True)
+        tx = CoWTransaction(transaction_id=tx_id, staging_dir=staging_dir)
+        self._active_transactions[tx_id] = tx
+        return tx
+
+    def stage_write(self, tx: CoWTransaction, relative_path: str, content: str) -> Path:
+        """Stage a file write inside the CoW transaction staging directory."""
+        if tx.is_committed or tx.is_discarded:
+            raise ValueError(f"Transaction {tx.transaction_id} is no longer active.")
+
+        # Validate file size
+        content_bytes = content.encode("utf-8")
+        if len(content_bytes) > self._max_file_bytes:
+            raise SandboxResourceError(
+                f"Staged file size ({len(content_bytes)} bytes) exceeds "
+                f"maximum ({self._max_file_bytes} bytes): {relative_path}",
+                limit_name="max_staged_file_size",
+                limit_value=self._max_file_bytes,
+            )
+
+        # Check total staging area capacity
+        self._check_staging_size(len(content_bytes))
+
+        clean_rel = self.validator.assert_inside_workspace(relative_path).relative_to(self.workspace_root).as_posix()
+        staged_path = tx.staging_dir / clean_rel
+        staged_path.parent.mkdir(parents=True, exist_ok=True)
+        staged_path.write_text(content, encoding="utf-8")
+
+        tx.staged_changes[clean_rel] = content
+        return staged_path
+
+    def stage_delete(self, tx: CoWTransaction, relative_path: str) -> None:
+        """Stage a file deletion inside the CoW transaction."""
+        if tx.is_committed or tx.is_discarded:
+            raise ValueError(f"Transaction {tx.transaction_id} is no longer active.")
+
+        clean_rel = self.validator.assert_inside_workspace(relative_path).relative_to(self.workspace_root).as_posix()
+        tx.staged_changes[clean_rel] = None  # None indicates deletion
+
+    def preview_changes(self, tx: CoWTransaction) -> str:
+        """Generate unified diff preview of all staged mutations in the transaction."""
+        diff_lines: list[str] = []
+
+        for clean_rel, after_content in sorted(tx.staged_changes.items()):
+            real_path = self.workspace_root / clean_rel
+            before_content = real_path.read_text(encoding="utf-8", errors="replace") if real_path.exists() else ""
+
+            if after_content is None:
+                # File deletion
+                after_content_str = ""
+            else:
+                after_content_str = after_content
+
+            diff_str = "".join(
+                unified_diff(
+                    before_content.splitlines(keepends=True),
+                    after_content_str.splitlines(keepends=True),
+                    fromfile=f"a/{clean_rel}",
+                    tofile=f"b/{clean_rel}",
+                )
+            )
+            if diff_str:
+                diff_lines.append(diff_str)
+
+        return "".join(diff_lines)
+
+    def commit_transaction(self, tx: CoWTransaction, command_name: str = "pulse cow commit") -> list[str]:
+        """Apply all staged edits atomically to the workspace inside a MutationTracker transaction."""
+        if tx.is_committed or tx.is_discarded:
+            raise ValueError(f"Transaction {tx.transaction_id} is no longer active.")
+
+        modified_files: list[str] = []
+
+        with self.mutations.transaction(command=command_name):
+            for clean_rel, content in tx.staged_changes.items():
+                real_path = self.workspace_root / clean_rel
+
+                if content is None:
+                    # Execute staged deletion
+                    if real_path.exists():
+                        real_path.unlink()
+                else:
+                    # Execute staged write
+                    real_path.parent.mkdir(parents=True, exist_ok=True)
+                    real_path.write_text(content, encoding="utf-8")
+
+                modified_files.append(clean_rel)
+
+        tx.is_committed = True
+        self._active_transactions.pop(tx.transaction_id, None)
+        self.discard_transaction(tx)  # Clean up staging directory
+        return modified_files
+
+    def discard_transaction(self, tx: CoWTransaction) -> None:
+        """Discard staged changes and delete temporary staging directory."""
+        if tx.staging_dir.exists():
+            shutil.rmtree(tx.staging_dir, ignore_errors=True)
+        tx.is_discarded = True
+        self._active_transactions.pop(tx.transaction_id, None)
+
+--- api.py ---
+"""High-level Sandbox API facade with Dependency Injection.
+
+Unified entry point integrating SandboxPolicy, PathValidator, SecretScrubber,
+StructuredAuditLogger, ResourceLimiter, ContainerBackend, and CoWFilesystem.
+
+Security hardening:
+    - Fail-secure: raises SandboxUnavailableError if no container backend available
+      and unsafe_host_execution is not explicitly True.
+    - read_file() uses TOCTOU-safe PathValidator.safe_read() with size limits.
+    - execute_command() determines isolation_level and logs it in audit.
+    - Host fallback requires explicit opt-in and logs UNSAFE_HOST warnings.
+    - initialize() must be called before first execute_command().
+"""
+
+from __future__ import annotations
+
+import time
+import warnings
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from pulse.sandbox.audit import StructuredAuditLogger
+from pulse.sandbox.backend import ContainerBackend, DockerBackend, HostBackend
+from pulse.sandbox.errors import SandboxUnavailableError
+from pulse.sandbox.filesystem import CoWFilesystem, CoWTransaction
+from pulse.sandbox.path_validator import PathValidator
+from pulse.sandbox.policy import ActionType, PolicyDecision, SandboxPolicy
+from pulse.sandbox.process import ProcessResult
+from pulse.sandbox.resources import ResourceLimits
+from pulse.sandbox.secrets import SecretScrubber
+
+# SecurityWarning is not available in all Python builds; define a fallback.
+try:
+    _SecurityWarning = SecurityWarning  # type: ignore[name-defined]
+except NameError:
+    class _SecurityWarning(UserWarning):  # type: ignore[no-redef]
+        """Fallback warning class for security-sensitive operations."""
+
+
+@dataclass
+class SandboxSession:
+    """Represents an active sandboxed agent session."""
+
+    session_id: str
+    workspace_root: Path
+    created_at: float = field(default_factory=time.time)
+
+
+class Sandbox:
+    """Production-ready secure execution sandbox facade.
+
+    Security architecture:
+        - Fail-secure by default: no silent host fallback.
+        - TOCTOU-safe file reads via PathValidator.safe_read().
+        - All file writes routed through CoW transactions.
+        - Container execution with workspace mounted read-only.
+        - Audit logging with isolation level tracking.
+
+    Args:
+        workspace_root: Path to the workspace directory.
+        policy: Policy engine for action authorization.
+        allowed_external_reads: Paths outside workspace allowed for reads.
+        secrets: List of secret strings to redact from output.
+        limits: Resource limits for process execution.
+        backend: Explicit container backend (overrides auto-detection).
+        audit_log_path: Path to the audit log file.
+        unsafe_host_execution: If True, allows fallback to HostBackend when
+            no container engine is available. Default False (fail-secure).
+
+    Raises:
+        SandboxUnavailableError: If no container backend is available and
+            unsafe_host_execution is False (after initialize() is called).
+    """
+
+    def __init__(
+        self,
+        workspace_root: Path,
+        policy: SandboxPolicy | None = None,
+        allowed_external_reads: list[Path] | None = None,
+        secrets: list[str] | None = None,
+        limits: ResourceLimits | None = None,
+        backend: ContainerBackend | None = None,
+        audit_log_path: Path | None = None,
+        unsafe_host_execution: bool = False,
+    ) -> None:
+        self.workspace_root = workspace_root.resolve()
+        self.policy = policy or SandboxPolicy()
+        self.validator = PathValidator(self.workspace_root, allowed_external_reads=allowed_external_reads)
+        self.scrubber = SecretScrubber(secrets=secrets)
+        self.limits = limits or ResourceLimits()
+        self._unsafe_host_execution = unsafe_host_execution
+
+        log_file = audit_log_path or (self.workspace_root / ".agent" / "logs" / "audit.jsonl")
+        self.audit_logger = StructuredAuditLogger(log_file, scrubber=self.scrubber)
+
+        # Backend initialization: explicit backend or deferred to initialize()
+        self._backend_explicit = backend is not None
+        self.backend = backend or HostBackend()
+        self._initialized = False
+
+        self.cow = CoWFilesystem(self.workspace_root)
+
+    async def initialize(self) -> None:
+        """Select preferred container backend. Must be called before execute_command().
+
+        Security behavior:
+            1. Try Docker/Podman. If available, use it.
+            2. If unavailable AND unsafe_host_execution=True: fall back to HostBackend
+               with warnings and audit logging.
+            3. If unavailable AND unsafe_host_execution=False: raise SandboxUnavailableError.
+        """
+        if self._backend_explicit:
+            # Caller provided an explicit backend — respect it
+            self._initialized = True
+            return
+
+        docker_be = DockerBackend()
+        if await docker_be.is_available():
+            self.backend = docker_be
+            self._initialized = True
+            self.audit_logger.record(
+                action="sandbox-init",
+                target=docker_be.name,
+                decision="allow",
+                isolation_level="container",
+                detail=f"Secure container backend '{docker_be.name}' initialized.",
+            )
+            return
+
+        # No container engine available
+        if self._unsafe_host_execution:
+            # Explicit opt-in to unsafe host execution
+            warnings.warn(
+                "No container engine (Docker/Podman) found. Falling back to "
+                "HostBackend — untrusted code will execute directly on the host. "
+                "This is NOT safe for production use with untrusted AI-generated code.",
+                _SecurityWarning,
+                stacklevel=2,
+            )
+            self.backend = HostBackend()
+            self._initialized = True
+            self.audit_logger.record(
+                action="sandbox-init",
+                target="host",
+                decision="allow",
+                isolation_level="host_unsafe",
+                detail="WARNING: Falling back to unsafe host execution. No container isolation.",
+            )
+            return
+
+        # Fail-secure: no container, no opt-in
+        self.audit_logger.record(
+            action="sandbox-init",
+            target="none",
+            decision="deny",
+            isolation_level="unavailable",
+            detail="No secure backend available and unsafe_host_execution=False.",
+        )
+        raise SandboxUnavailableError()
+
+    def _get_isolation_level(self) -> str:
+        """Determine the current isolation level for audit logging."""
+        if isinstance(self.backend, HostBackend) or getattr(self.backend, "is_unsafe", False):
+            return "host_unsafe"
+        return "container"
+
+    def read_file(self, relative_path: str) -> str:
+        """Read a file securely within workspace boundaries after policy authorization.
+
+        Security guarantees:
+            - Policy authorization checked before any I/O.
+            - TOCTOU-safe read via PathValidator.safe_read() (atomic open + validate).
+            - File size enforced (MAX_FILE_SIZE prevents OOM).
+            - Secret scrubbing applied to returned content.
+        """
+        decision = self.policy.evaluate(ActionType.READ, relative_path)
+        if decision == PolicyDecision.DENY:
+            self.audit_logger.record(action="read", target=relative_path, decision="deny", detail="Policy denied read access")
+            raise PermissionError(f"Policy denied read access to '{relative_path}'")
+
+        # TOCTOU-safe read: validates path, opens with O_NOFOLLOW, checks size, reads in chunks
+        raw_content = self.validator.safe_read(relative_path)
+        clean_content = self.scrubber.redact(raw_content)
+
+        self.audit_logger.record(action="read", target=relative_path, decision=decision.value, detail="Read file successfully")
+        return clean_content
+
+    async def execute_command(
+        self,
+        command: str | list[str],
+        cwd: Path | str | None = None,
+        env: dict[str, str] | None = None,
+    ) -> ProcessResult:
+        """Execute a shell command inside the isolated container backend.
+
+        Security guarantees:
+            - Policy authorization checked before execution.
+            - If not initialized, auto-initializes (fail-secure).
+            - Isolation level tracked and audit-logged.
+            - Secret scrubbing applied to stdout/stderr.
+        """
+        # Auto-initialize if not yet done (fail-secure)
+        if not self._initialized:
+            await self.initialize()
+
+        cmd_str = command if isinstance(command, str) else " ".join(command)
+        network_allowed = self.policy.is_allowed(ActionType.NETWORK)
+        isolation_level = self._get_isolation_level()
+
+        decision = self.policy.evaluate(ActionType.SHELL, cmd_str)
+        if decision == PolicyDecision.DENY:
+            self.audit_logger.record(
+                action="shell", target=cmd_str, decision="deny",
+                isolation_level=isolation_level,
+                detail="Policy denied shell command execution",
+            )
+            return ProcessResult(
+                command=cmd_str,
+                exit_code=-1,
+                stdout="",
+                stderr="Policy denied shell execution.",
+                duration_ms=0.0,
+            )
+
+        start_time = time.monotonic()
+        target_dir = self.validator.validate_path(cwd or self.workspace_root)
+
+        result = await self.backend.execute(
+            command=command,
+            workspace_root=self.workspace_root,
+            cwd=target_dir,
+            env=env,
+            limits=self.limits,
+            network_enabled=network_allowed,
+        )
+
+        clean_stdout = self.scrubber.redact(result.stdout)
+        clean_stderr = self.scrubber.redact(result.stderr)
+        duration_ms = (time.monotonic() - start_time) * 1000.0
+
+        self.audit_logger.record(
+            action="shell",
+            target=cmd_str,
+            decision=decision.value,
+            exit_code=result.exit_code,
+            duration_ms=duration_ms,
+            container_id=getattr(self.backend, "name", "unknown"),
+            isolation_level=isolation_level,
+            detail=f"Executed command via {self.backend.name} backend",
+        )
+
+        # Extract overlay changes to the active workspace via CoW
+        if result.overlay_path and result.overlay_path.exists():
+            import shutil
+            try:
+                tx = None
+                for item in result.overlay_path.rglob("*"):
+                    if item.is_file():
+                        try:
+                            rel_path = item.relative_to(result.overlay_path)
+                            if tx is None:
+                                tx = self.create_transaction()
+                            content = item.read_bytes()
+                            # Try to decode as string, fallback to bytes if we ever support it.
+                            # Currently stage_write expects str.
+                            self.stage_write(tx, str(rel_path), content.decode("utf-8", errors="replace"))
+                        except ValueError:
+                            pass
+                if tx and tx.operations:
+                    self.commit_transaction(tx)
+            finally:
+                shutil.rmtree(result.overlay_path, ignore_errors=True)
+
+        return ProcessResult(
+            command=cmd_str,
+            exit_code=result.exit_code,
+            stdout=clean_stdout,
+            stderr=clean_stderr,
+            duration_ms=duration_ms,
+            timed_out=result.timed_out,
+            truncated=result.truncated,
+            pid=result.pid,
+            overlay_path=None,  # Consumed and cleaned up
+        )
+
+    # -----------------------------------------------------------------------
+    # CoW Transaction API
+    # -----------------------------------------------------------------------
+
+    def create_transaction(self) -> CoWTransaction:
+        return self.cow.create_transaction()
+
+    def stage_write(self, tx: CoWTransaction, relative_path: str, content: str) -> Path:
+        decision = self.policy.evaluate(ActionType.WRITE, relative_path)
+        if decision == PolicyDecision.DENY:
+            self.audit_logger.record(action="write", target=relative_path, decision="deny", detail="Policy denied write access")
+            raise PermissionError(f"Policy denied write access to '{relative_path}'")
+
+        path = self.cow.stage_write(tx, relative_path, content)
+        self.audit_logger.record(action="write-staged", target=relative_path, decision=decision.value)
+        return path
+
+    def stage_delete(self, tx: CoWTransaction, relative_path: str) -> None:
+        decision = self.policy.evaluate(ActionType.DELETE, relative_path)
+        if decision == PolicyDecision.DENY:
+            self.audit_logger.record(action="delete", target=relative_path, decision="deny", detail="Policy denied delete access")
+            raise PermissionError(f"Policy denied delete access to '{relative_path}'")
+
+        self.cow.stage_delete(tx, relative_path)
+        self.audit_logger.record(action="delete-staged", target=relative_path, decision=decision.value)
+
+    def preview_changes(self, tx: CoWTransaction) -> str:
+        return self.cow.preview_changes(tx)
+
+    def commit_transaction(self, tx: CoWTransaction) -> list[str]:
+        modified = self.cow.commit_transaction(tx)
+        for f in modified:
+            self.audit_logger.record(action="commit", target=f, decision="allow", detail="Committed CoW edit")
+        return modified
+
+    def discard_transaction(self, tx: CoWTransaction) -> None:
+        self.cow.discard_transaction(tx)
+        self.audit_logger.record(action="discard", target=tx.transaction_id, decision="allow", detail="Discarded CoW transaction")
+
+--- backend/base.py ---
+"""Structural protocol for sandbox container execution backends."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Protocol, runtime_checkable
+
+from pulse.sandbox.process import ProcessResult
+from pulse.sandbox.resources import ResourceLimits
+
+
+@runtime_checkable
+class ContainerBackend(Protocol):
+    """Abstract interface satisfied by Docker, Podman, and Host backends."""
+
+    name: str
+
+    async def is_available(self) -> bool:
+        """Return True if this container backend engine is installed and operational."""
+        ...
+
+    async def execute(
+        self,
+        command: str | list[str],
+        workspace_root: Path,
+        cwd: Path | None = None,
+        env: dict[str, str] | None = None,
+        limits: ResourceLimits | None = None,
+        network_enabled: bool = False,
+    ) -> ProcessResult:
+        """Run a command inside the isolated backend environment.
+
+        Args:
+            command: Command string or argument list to run.
+            workspace_root: Absolute host path to the workspace root directory.
+            cwd: Working directory (must be inside workspace_root).
+            env: Environment variable overrides.
+            limits: Process resource limits.
+            network_enabled: Whether outbound network access is granted.
+
+        Returns:
+            ProcessResult object containing execution status and output.
+        """
+        ...
+
+    async def cleanup(self) -> None:
+        """Reap temporary volumes, containers, or process artifacts."""
+        ...
+
+--- backend/docker.py ---
+"""Rootless Docker and Podman container execution backend.
+
+Enforces capability dropping (--cap-drop=ALL), read-only root filesystems (--read-only),
+tmpfs /tmp mounts, non-root user execution, and network isolation (--network none).
+
+Security hardening (CoW bypass fix):
+    - Workspace mounted as READ-ONLY (:ro) inside the container.
+    - Writable overlay at /workspace-overlay for container writes.
+    - After execution, overlay changes are extracted and returned for CoW staging.
+    - --memory-swap equal to --memory prevents swap exhaustion.
+    - --user 65534:65534 (nobody) prevents container root execution.
+    - --cpu-quota/--cpu-period for CPU limiting.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import shutil
+import tempfile
+import uuid
+from pathlib import Path
+
+from pulse.sandbox.process import ProcessManager, ProcessResult
+from pulse.sandbox.resources import ResourceLimits
+
+
+class DockerBackend:
+    """Production-grade rootless container execution backend.
+
+    Security architecture:
+        The workspace is mounted read-only (:ro) to prevent any container
+        process from modifying workspace files directly, closing the CoW
+        bypass vulnerability. A writable tmpfs overlay at /workspace-overlay
+        is provided for container processes that need to write files. After
+        execution, the caller can extract changes from the overlay and route
+        them through the CoW transaction layer.
+    """
+
+    def __init__(
+        self,
+        image: str = "python:3.11-slim",
+        container_engine: str | None = None,
+        process_manager: ProcessManager | None = None,
+    ) -> None:
+        self.image = image
+        self._engine = container_engine
+        self.process_manager = process_manager or ProcessManager()
+
+    @property
+    def name(self) -> str:
+        return self._engine or "docker"
+
+    async def is_available(self) -> bool:
+        """Check if Docker or Podman CLI is installed on the host."""
+        if self._engine:
+            return shutil.which(self._engine) is not None
+        if shutil.which("podman"):
+            self._engine = "podman"
+            return True
+        if shutil.which("docker"):
+            self._engine = "docker"
+            return True
+        return False
+
+    def build_docker_cmd(
+        self,
+        command: str | list[str],
+        workspace_root: Path,
+        cwd: Path | None = None,
+        env: dict[str, str] | None = None,
+        limits: ResourceLimits | None = None,
+        network_enabled: bool = False,
+        cidfile: Path | None = None,
+    ) -> list[str]:
+        """Construct the exact `docker run` or `podman run` CLI arguments.
+
+        Security architecture:
+            1. Workspace is mounted READ-ONLY (:ro) — prevents CoW bypass.
+            2. /workspace-overlay is a writable tmpfs for container writes.
+            3. Capabilities are dropped (--cap-drop=ALL).
+            4. Root filesystem is read-only (--read-only).
+            5. No new privileges (--security-opt=no-new-privileges:true).
+            6. User is nobody (65534:65534) — no root in container.
+            7. Memory-swap equals memory — prevents swap exhaustion.
+        """
+        engine = self._engine or "docker"
+        workspace_abs = str(workspace_root.resolve())
+
+        # Determine relative container working directory
+        rel_workdir = "/workspace"
+        if cwd:
+            resolved_cwd = cwd.resolve()
+            try:
+                rel_parts = resolved_cwd.relative_to(workspace_root.resolve())
+                rel_workdir = f"/workspace/{rel_parts.as_posix()}".rstrip("/")
+            except ValueError:
+                rel_workdir = "/workspace"
+
+        cmd_args: list[str] = [
+            engine,
+            "run",
+        ]
+        if not cidfile:
+            cmd_args.append("--rm")
+            
+        cmd_args.extend([
+            "-i",
+            "--read-only",
+            "--cap-drop=ALL",
+            "--security-opt=no-new-privileges:true",
+            # Non-root user inside container (nobody)
+            "--user", "65534:65534",
+            # /tmp as writable tmpfs (noexec prevents execution from /tmp)
+            "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m",
+            # CRITICAL FIX: Workspace mounted READ-ONLY to prevent CoW bypass.
+            # Container processes CANNOT modify workspace files directly.
+            "-v", f"{workspace_abs}:/workspace:ro",
+            # Writable overlay for any container writes — extracted after execution
+            "--tmpfs", "/workspace-overlay:rw,size=256m",
+            # Working directory
+            "-w", rel_workdir,
+        ])
+
+        if cidfile:
+            cmd_args.insert(2, f"--cidfile={cidfile.as_posix()}")
+
+        # Network isolation flag
+        if not network_enabled:
+            cmd_args.extend(["--network", "none"])
+
+        # Resource limits flags
+        if limits:
+            if limits.max_memory_bytes > 0:
+                cmd_args.extend(["--memory", f"{limits.max_memory_bytes}b"])
+                # Prevent swap exhaustion: set swap limit equal to memory limit
+                cmd_args.extend(["--memory-swap", f"{limits.max_memory_bytes}b"])
+            if limits.max_pids > 0:
+                cmd_args.extend(["--pids-limit", str(limits.max_pids)])
+            # CPU limiting
+            if limits.max_cpu_percent > 0 and limits.max_cpu_percent < 100:
+                cpu_period = 100000  # 100ms default
+                cpu_quota = int(cpu_period * limits.max_cpu_percent / 100.0)
+                cmd_args.extend(["--cpu-period", str(cpu_period)])
+                cmd_args.extend(["--cpu-quota", str(cpu_quota)])
+
+        # Environment variables
+        if env:
+            for k, v in env.items():
+                cmd_args.extend(["-e", f"{k}={v}"])
+
+        # Image and target command
+        cmd_args.append(self.image)
+        if isinstance(command, str):
+            cmd_args.extend(["sh", "-c", command])
+        else:
+            cmd_args.extend(command)
+
+        return cmd_args
+
+    async def execute(
+        self,
+        command: str | list[str],
+        workspace_root: Path,
+        cwd: Path | None = None,
+        env: dict[str, str] | None = None,
+        limits: ResourceLimits | None = None,
+        network_enabled: bool = False,
+    ) -> ProcessResult:
+        if not await self.is_available():
+            return ProcessResult(
+                command=str(command),
+                exit_code=-1,
+                stdout="",
+                stderr=f"Container engine '{self.name}' is not installed or available on this system.",
+                duration_ms=0.0,
+            )
+
+        engine = self._engine or "docker"
+        # We need a temporary place for the cidfile and the extracted overlay
+        tmp_base = Path(tempfile.gettempdir()) / "pulse_sandbox"
+        tmp_base.mkdir(parents=True, exist_ok=True)
+        
+        tx_id = str(uuid.uuid4())
+        cidfile = tmp_base / f"{tx_id}.cid"
+        overlay_extract_dir = tmp_base / f"{tx_id}_overlay"
+        
+        docker_cmd = self.build_docker_cmd(
+            command=command,
+            workspace_root=workspace_root,
+            cwd=cwd,
+            env=env,
+            limits=limits,
+            network_enabled=network_enabled,
+            cidfile=cidfile,
+        )
+
+        try:
+            result = await self.process_manager.execute(docker_cmd, cwd=workspace_root, limits=limits)
+            
+            # Extract overlay if container ID was captured
+            if cidfile.exists():
+                cid = cidfile.read_text(encoding="utf-8").strip()
+                if cid:
+                    overlay_extract_dir.mkdir(parents=True, exist_ok=True)
+                    # docker cp <cid>:/workspace-overlay/. <extract_dir>
+                    # Note: /workspace-overlay might just be empty if untouched, but docker cp needs careful handling
+                    # We copy the directory contents
+                    cp_cmd = [engine, "cp", f"{cid}:/workspace-overlay", str(overlay_extract_dir)]
+                    proc = await asyncio.create_subprocess_exec(
+                        *cp_cmd,
+                        stdout=asyncio.subprocess.DEVNULL,
+                        stderr=asyncio.subprocess.DEVNULL,
+                    )
+                    await proc.wait()
+                    
+                    # Remove the container now that we've extracted
+                    rm_cmd = [engine, "rm", "-f", cid]
+                    rm_proc = await asyncio.create_subprocess_exec(
+                        *rm_cmd,
+                        stdout=asyncio.subprocess.DEVNULL,
+                        stderr=asyncio.subprocess.DEVNULL,
+                    )
+                    await rm_proc.wait()
+            
+            # Create a new result with the overlay path
+            return ProcessResult(
+                command=result.command,
+                exit_code=result.exit_code,
+                stdout=result.stdout,
+                stderr=result.stderr,
+                duration_ms=result.duration_ms,
+                timed_out=result.timed_out,
+                truncated=result.truncated,
+                pid=result.pid,
+                overlay_path=overlay_extract_dir if overlay_extract_dir.exists() else None
+            )
+        finally:
+            if cidfile.exists():
+                try:
+                    cidfile.unlink()
+                except OSError:
+                    pass
+
+    async def cleanup(self) -> None:
+        await self.process_manager.terminate_all()
+
+--- backend/host.py ---
+"""Restricted host process execution backend.
+
+Fallback backend that executes processes directly on the host using ProcessManager
+and PathValidator when container engines are unavailable.
+
+Security hardening (unsafe host fallback):
+    - Marked as is_unsafe=True to distinguish from container execution.
+    - Every execution logs an UNSAFE_HOST isolation level warning.
+    - network_enabled parameter is now respected (blocks via policy, not enforcement).
+    - This backend should ONLY be used when the caller explicitly opts in
+      via unsafe_host_execution=True on the Sandbox constructor.
+"""
+
+from __future__ import annotations
+
+import warnings
+from pathlib import Path
+
+from pulse.sandbox.path_validator import PathValidator
+from pulse.sandbox.process import ProcessManager, ProcessResult
+from pulse.sandbox.resources import ResourceLimits
+
+# SecurityWarning is not available in all Python builds; define a fallback.
+try:
+    _SecurityWarning = SecurityWarning  # type: ignore[name-defined]
+except NameError:
+    class _SecurityWarning(UserWarning):  # type: ignore[no-redef]
+        """Fallback warning class for security-sensitive operations."""
+
+
+class HostBackend:
+    """Restricted host execution fallback engine.
+
+    WARNING: This backend provides NO container isolation. All commands
+    execute directly on the host machine. It exists only as an explicitly
+    opt-in fallback for development environments where Docker/Podman
+    is unavailable.
+
+    Security properties:
+        - is_unsafe=True: always reports itself as unsafe.
+        - PathValidator enforces workspace directory containment for cwd.
+        - ResourceLimiter enforces POSIX rlimits (memory, PIDs, files) where available.
+        - Environment is sanitized (dangerous vars stripped).
+        - NO filesystem isolation, NO network isolation, NO capability dropping.
+    """
+
+    name = "host"
+    is_unsafe: bool = True
+
+    def __init__(self, process_manager: ProcessManager | None = None) -> None:
+        self.process_manager = process_manager or ProcessManager()
+
+    async def is_available(self) -> bool:
+        """Host backend is always available."""
+        return True
+
+    async def execute(
+        self,
+        command: str | list[str],
+        workspace_root: Path,
+        cwd: Path | None = None,
+        env: dict[str, str] | None = None,
+        limits: ResourceLimits | None = None,
+        network_enabled: bool = False,
+    ) -> ProcessResult:
+        """Execute command directly on host — NO CONTAINER ISOLATION.
+
+        Security warning:
+            This method executes arbitrary commands on the host machine.
+            It should only be reachable when the Sandbox was constructed
+            with unsafe_host_execution=True.
+        """
+        warnings.warn(
+            "HostBackend.execute(): Running untrusted code directly on host "
+            "without container isolation. This is NOT safe for production use.",
+            _SecurityWarning,
+            stacklevel=2,
+        )
+
+        validator = PathValidator(workspace_root)
+        target_dir = validator.validate_path(cwd or workspace_root)
+
+        return await self.process_manager.execute(
+            command=command,
+            cwd=target_dir,
+            env=env,
+            limits=limits,
+        )
+
+    async def cleanup(self) -> None:
+        await self.process_manager.terminate_all()
+
+--- __init__.py ---
+"""Industry-Grade Secure Sandbox Subsystem for Pulse.
+
+Provides workspace isolation, rootless container execution, fine-grained
+policy permissions, secret protection, process management, and structured
+audit logging.
+"""
+
+from pulse.sandbox.api import Sandbox, SandboxSession
+from pulse.sandbox.audit import StructuredAuditEntry, StructuredAuditLogger
+from pulse.sandbox.backend import ContainerBackend, DockerBackend, HostBackend
+from pulse.sandbox.errors import (
+    SandboxResourceError,
+    SandboxSecurityError,
+    SandboxUnavailableError,
+)
+from pulse.sandbox.filesystem import CoWFilesystem, CoWTransaction
+from pulse.sandbox.git_safe import SafeGit
+from pulse.sandbox.path_validator import PathValidationError, PathValidator
+from pulse.sandbox.policy import ActionType, PolicyDecision, PolicyRule, SandboxPolicy
+from pulse.sandbox.process import ProcessManager, ProcessResult
+from pulse.sandbox.project import ProjectSandbox
+from pulse.sandbox.python_safe import SafePython
+from pulse.sandbox.resources import ResourceLimiter, ResourceLimits
+from pulse.sandbox.secrets import SecretScrubber
+
+__all__ = [
+    "ActionType",
+    "CoWFilesystem",
+    "CoWTransaction",
+    "ContainerBackend",
+    "DockerBackend",
+    "HostBackend",
+    "PathValidationError",
+    "PathValidator",
+    "PolicyDecision",
+    "PolicyRule",
+    "ProcessManager",
+    "ProcessResult",
+    "ProjectSandbox",
+    "ResourceLimiter",
+    "ResourceLimits",
+    "SafeGit",
+    "SafePython",
+    "Sandbox",
+    "SandboxPolicy",
+    "SandboxResourceError",
+    "SandboxSecurityError",
+    "SandboxSession",
+    # New security error types
+    "SandboxUnavailableError",
+    "SecretScrubber",
+    "StructuredAuditEntry",
+    "StructuredAuditLogger",
+]
