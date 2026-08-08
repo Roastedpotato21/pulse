@@ -5,8 +5,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
+from pulse.sandbox.network import NetworkEnforcementLevel, NetworkPolicy
 from pulse.sandbox.process import ProcessResult
 from pulse.sandbox.resources import ResourceLimits
+from pulse.sandbox.secrets import SecretEnforcementLevel, SecretPolicy
 
 
 @runtime_checkable
@@ -26,7 +28,8 @@ class ContainerBackend(Protocol):
         cwd: Path | None = None,
         env: dict[str, str] | None = None,
         limits: ResourceLimits | None = None,
-        network_enabled: bool = False,
+        network_policy: NetworkPolicy | None = None,
+        secret_policy: SecretPolicy | None = None,
     ) -> ProcessResult:
         """Run a command inside the isolated backend environment.
 
@@ -36,11 +39,19 @@ class ContainerBackend(Protocol):
             cwd: Working directory (must be inside workspace_root).
             env: Environment variable overrides.
             limits: Process resource limits.
-            network_enabled: Whether outbound network access is granted.
+            network_policy: Execution network policy configuration.
 
         Returns:
             ProcessResult object containing execution status and output.
         """
+        ...
+
+    def get_network_enforcement_capability(self, policy: NetworkPolicy) -> NetworkEnforcementLevel:
+        """Determine if this backend can strongly enforce the requested network policy."""
+        ...
+
+    def get_secret_enforcement_capability(self, policy: SecretPolicy) -> SecretEnforcementLevel:
+        """Determine if this backend can strongly enforce the requested secret isolation policy."""
         ...
 
     async def cleanup(self) -> None:

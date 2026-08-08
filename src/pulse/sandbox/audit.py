@@ -49,6 +49,7 @@ class StructuredAuditEntry:
     duration_ms: float | None = None
     container_id: str | None = None
     isolation_level: str = "container"  # "container", "host_unsafe", "unavailable"
+    enforcement_level: str | None = None
     redacted: bool = False
     detail: str = ""
 
@@ -78,6 +79,8 @@ class StructuredAuditLogger:
         duration_ms: float | None = None,
         container_id: str | None = None,
         isolation_level: str = "container",
+        enforcement_level: str | None = None,
+        redacted: bool = False,
         detail: str = "",
     ) -> StructuredAuditEntry:
         """Create, sanitize, and record an audit entry."""
@@ -102,6 +105,7 @@ class StructuredAuditLogger:
             duration_ms=duration_ms,
             container_id=container_id,
             isolation_level=isolation_level,
+            enforcement_level=enforcement_level,
             redacted=was_redacted,
             detail=clean_detail,
         )
@@ -109,6 +113,29 @@ class StructuredAuditLogger:
         self._entries.append(entry)
         self._write_entry(entry)
         return entry
+
+    def log_network(
+        self,
+        destination: str,
+        port: int | None,
+        protocol: str,
+        decision: str,
+        backend: str,
+        enforcement_level: str | None = None,
+        detail: str = "",
+    ) -> StructuredAuditEntry:
+        """Log a network access policy decision."""
+        target = f"{destination}:{port}" if port else destination
+        target = f"{protocol}://{target}" if protocol else target
+        
+        return self.record(
+            action="network",
+            target=target,
+            decision=decision,
+            container_id=backend,
+            enforcement_level=enforcement_level,
+            detail=detail,
+        )
 
     def _write_entry(self, entry: StructuredAuditEntry) -> None:
         try:

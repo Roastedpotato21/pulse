@@ -30,6 +30,18 @@ class SandboxUnavailableError(RuntimeError):
         )
 
 
+class SandboxUnsupportedPolicyError(SandboxUnavailableError):
+    """The requested security policy cannot be strongly enforced by the active backend.
+    
+    Security rationale:
+        Fail-closed behavior is mandatory. If a restrictive network or isolation policy
+        is requested but the backend lacks the OS-level capability to enforce it
+        (e.g., trying to use ALLOWLIST in rootless Docker without egress filtering,
+        or DENY_ALL in HostBackend), execution must be rejected rather than silently
+        downgraded to advisory enforcement.
+    """
+
+
 class SandboxSecurityError(RuntimeError):
     """A sandbox security boundary has been violated.
 
@@ -58,4 +70,23 @@ class SandboxResourceError(RuntimeError):
     def __init__(self, message: str, *, limit_name: str = "", limit_value: int = 0) -> None:
         self.limit_name = limit_name
         self.limit_value = limit_value
+        super().__init__(message)
+
+
+class SandboxConcurrentModificationError(RuntimeError):
+    """A target file was modified externally during a CoW transaction.
+
+    Raised when ``commit_transaction()`` detects that a file's identity,
+    size, mtime, or content has changed since the transaction first staged
+    it.  The transaction is NOT destroyed when this error is raised, so
+    callers may retry or inspect staged changes.
+
+    Attributes:
+        path: Relative workspace path of the conflicting file.
+        reason: Human-readable description of the detected change.
+    """
+
+    def __init__(self, message: str, *, path: str = "", reason: str = "") -> None:
+        self.path = path
+        self.reason = reason
         super().__init__(message)

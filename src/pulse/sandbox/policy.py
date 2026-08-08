@@ -30,6 +30,7 @@ class ActionType(str, Enum):
     GIT = "git"
     PYTHON = "python"
     NETWORK = "network"
+    SECRETS = "secrets"
 
 
 class PolicyDecision(str, Enum):
@@ -55,7 +56,7 @@ class PolicyRule:
         case-sensitivity bypass on Linux where filenames are case-sensitive
         but policy rules may have been written case-insensitively.
         """
-        if self.action != "*" and self.action.lower() != action.lower():
+        if self.action != "*" and self.action.casefold() != action.casefold():
             return False
         if self.target_pattern == "*":
             return True
@@ -67,7 +68,7 @@ class PolicyRule:
 
         return (
             fnmatch.fnmatch(raw_normalized, normalized_pattern)
-            or fnmatch.fnmatch(target.replace("\\", "/").lower(), normalized_pattern)
+            or fnmatch.fnmatch(target.replace("\\", "/").casefold(), normalized_pattern)
         )
 
 
@@ -79,6 +80,7 @@ class SandboxPolicy:
         - READ defaults to ALLOW (read-only operations are safe).
         - GIT and PYTHON default to ASK (require explicit approval).
         - NETWORK defaults to DENY.
+        - SECRETS defaults to DENY.
     """
 
     DEFAULT_DECISIONS: dict[str, PolicyDecision] = {  # noqa: RUF012
@@ -90,6 +92,7 @@ class SandboxPolicy:
         ActionType.GIT.value: PolicyDecision.ASK,
         ActionType.PYTHON.value: PolicyDecision.ASK,
         ActionType.NETWORK.value: PolicyDecision.DENY,
+        ActionType.SECRETS.value: PolicyDecision.DENY,
     }
 
     def __init__(
@@ -106,7 +109,7 @@ class SandboxPolicy:
         self.rules.insert(0, rule)  # Higher priority rules first
 
     def evaluate(self, action: ActionType | str, target: str = "") -> PolicyDecision:
-        action_str = action.value if isinstance(action, ActionType) else str(action).lower()
+        action_str = action.value if isinstance(action, ActionType) else str(action).casefold()
 
         # 1. Check explicit rules (most specific target patterns first)
         for rule in self.rules:
@@ -147,12 +150,15 @@ class SandboxPolicy:
         # 2. Normalize separators
         normalized = normalized.replace("\\", "/")
 
-        # 3. Lowercase
-        normalized = normalized.lower()
+        # 3. Casefold (robust lowercasing for Unicode)
+        normalized = normalized.casefold()
 
-        # 4. Strip drive letter prefix (e.g., c:/ or C:/)
-        if len(normalized) >= 3 and normalized[1] == ":" and normalized[2] == "/":
-            normalized = normalized[2:]
+        # 4. Strip drive letter prefix (e.g., c:/ or C:/ or C:file.txt)
+        if len(normalized) >= 2 and normalized[0].isalpha() and normalized[1] == ":":
+            if len(normalized) >= 3 and normalized[2] == "/":
+                normalized = normalized[3:]  # Strip "c:/"
+            else:
+                normalized = normalized[2:]  # Strip "c:" (drive-relative)
 
         # 5. Collapse consecutive slashes
         while "//" in normalized:
@@ -167,15 +173,15 @@ class SandboxPolicy:
     def from_dict(cls, data: dict[str, Any], parent_policy: SandboxPolicy | None = None) -> SandboxPolicy:
         defaults: dict[str, PolicyDecision] = {}
         for action_name, decision_val in data.get("defaults", {}).items():
-            defaults[action_name.lower()] = PolicyDecision(str(decision_val).lower())
+            defaults[action_name.casefold()] = PolicyDecision(str(decision_val).casefold())
 
         rules: list[PolicyRule] = []
         for raw_rule in data.get("rules", []):
             rules.append(
                 PolicyRule(
-                    action=str(raw_rule.get("action", "*")).lower(),
+                    action=str(raw_rule.get("action", "*")).casefold(),
                     target_pattern=str(raw_rule.get("target_pattern", "*")),
-                    decision=PolicyDecision(str(raw_rule.get("decision", "ask")).lower()),
+                    decision=PolicyDecision(str(raw_rule.get("decision", "ask")).casefold()),
                     reason=str(raw_rule.get("reason", "")),
                 )
             )

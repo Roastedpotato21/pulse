@@ -21,13 +21,19 @@ from pathlib import Path
 
 from pulse.sandbox.audit import StructuredAuditLogger
 from pulse.sandbox.backend import ContainerBackend, DockerBackend, HostBackend
-from pulse.sandbox.errors import SandboxUnavailableError
+from pulse.sandbox.errors import SandboxUnavailableError, SandboxUnsupportedPolicyError
 from pulse.sandbox.filesystem import CoWFilesystem, CoWTransaction
+from pulse.sandbox.network import NetworkEnforcementLevel, NetworkMode, NetworkPolicy
 from pulse.sandbox.path_validator import PathValidator
 from pulse.sandbox.policy import ActionType, PolicyDecision, SandboxPolicy
 from pulse.sandbox.process import ProcessResult
-from pulse.sandbox.resources import ResourceLimits
-from pulse.sandbox.secrets import SecretScrubber
+from pulse.sandbox.resources import ResourceLimits, ResourcePolicy
+from pulse.sandbox.secrets import (
+    SecretEnforcementLevel,
+    SecretMode,
+    SecretPolicy,
+    SecretScrubber,
+)
 
 # SecurityWarning is not available in all Python builds; define a fallback.
 try:
@@ -78,16 +84,20 @@ class Sandbox:
         policy: SandboxPolicy | None = None,
         allowed_external_reads: list[Path] | None = None,
         secrets: list[str] | None = None,
-        limits: ResourceLimits | None = None,
+        limits: ResourceLimits | ResourcePolicy | None = None,
+        network_policy: NetworkPolicy | None = None,
+        secret_policy: SecretPolicy | None = None,
         backend: ContainerBackend | None = None,
         audit_log_path: Path | None = None,
         unsafe_host_execution: bool = False,
     ) -> None:
         self.workspace_root = workspace_root.resolve()
         self.policy = policy or SandboxPolicy()
+        self.network_policy = network_policy
+        self.secret_policy = secret_policy
         self.validator = PathValidator(self.workspace_root, allowed_external_reads=allowed_external_reads)
         self.scrubber = SecretScrubber(secrets=secrets)
-        self.limits = limits or ResourceLimits()
+        self.limits = limits or ResourcePolicy()
         self._unsafe_host_execution = unsafe_host_execution
 
         log_file = audit_log_path or (self.workspace_root / ".agent" / "logs" / "audit.jsonl")
@@ -205,6 +215,78 @@ class Sandbox:
 
         cmd_str = command if isinstance(command, str) else " ".join(command)
         network_allowed = self.policy.is_allowed(ActionType.NETWORK)
+        secrets_allowed = self.policy.is_allowed(ActionType.SECRETS)
+        
+        # Resolve effective network policy
+        effective_network_policy = self.network_policy
+        if not network_allowed:
+            effective_network_policy = NetworkPolicy(mode=NetworkMode.DENY_ALL)
+        elif not effective_network_policy:
+            if getattr(self.backend, "is_unsafe", False):
+                effective_network_policy = NetworkPolicy(mode=NetworkMode.ALLOW_ALL)
+            else:
+                effective_network_policy = NetworkPolicy(mode=NetworkMode.DENY_ALL)
+
+        # Resolve effective secret policy
+        effective_secret_policy = self.secret_policy
+        if not secrets_allowed:
+            effective_secret_policy = SecretPolicy(mode=SecretMode.DENY_ALL)
+        elif not effective_secret_policy:
+            if getattr(self.backend, "is_unsafe", False):
+                effective_secret_policy = SecretPolicy(mode=SecretMode.ALLOW_ALL)
+            else:
+                effective_secret_policy = SecretPolicy(mode=SecretMode.DENY_ALL)
+            
+        # Enforce fail-closed capability checks
+        net_capability = self.backend.get_network_enforcement_capability(effective_network_policy)
+        sec_capability = self.backend.get_secret_enforcement_capability(effective_secret_policy)
+        
+        self.audit_logger.log_network(
+            destination="*",
+            port=None,
+            protocol="any",
+            decision="allow" if effective_network_policy.mode != NetworkMode.DENY_ALL else "deny",
+            backend=getattr(self.backend, "name", "unknown"),
+            enforcement_level=net_capability.value,
+            detail=f"Network policy mode applied: {effective_network_policy.mode.value}"
+        )
+
+        self.audit_logger.record(
+            action="secrets",
+            target="environment",
+            decision="allow" if effective_secret_policy.mode != SecretMode.DENY_ALL else "deny",
+            isolation_level=sec_capability.value,
+            detail=f"Secret policy mode applied: {effective_secret_policy.mode.value}",
+        )
+            
+        if effective_network_policy.mode != NetworkMode.DENY_ALL and not network_allowed:
+            pass
+        elif net_capability != NetworkEnforcementLevel.STRONGLY_ENFORCED:
+            self.audit_logger.record(
+                action="shell", target=cmd_str, decision="deny",
+                isolation_level=self._get_isolation_level(),
+                detail=f"Backend cannot strongly enforce network policy: {effective_network_policy.mode.value}",
+            )
+            raise SandboxUnsupportedPolicyError(
+                f"Backend '{getattr(self.backend, 'name', 'unknown')}' cannot strongly enforce "
+                f"network policy mode '{effective_network_policy.mode.value}'. "
+                "Execution rejected to prevent silent security downgrades."
+            )
+
+        if effective_secret_policy.mode != SecretMode.DENY_ALL and not secrets_allowed:
+            pass
+        elif sec_capability != SecretEnforcementLevel.STRONGLY_ENFORCED:
+            self.audit_logger.record(
+                action="shell", target=cmd_str, decision="deny",
+                isolation_level=self._get_isolation_level(),
+                detail=f"Backend cannot strongly enforce secret policy: {effective_secret_policy.mode.value}",
+            )
+            raise SandboxUnsupportedPolicyError(
+                f"Backend '{getattr(self.backend, 'name', 'unknown')}' cannot strongly enforce "
+                f"secret policy mode '{effective_secret_policy.mode.value}'. "
+                "Execution rejected to prevent silent credential leakage."
+            )
+
         isolation_level = self._get_isolation_level()
 
         decision = self.policy.evaluate(ActionType.SHELL, cmd_str)
@@ -231,7 +313,8 @@ class Sandbox:
             cwd=target_dir,
             env=env,
             limits=self.limits,
-            network_enabled=network_allowed,
+            network_policy=effective_network_policy,
+            secret_policy=effective_secret_policy,
         )
 
         clean_stdout = self.scrubber.redact(result.stdout)
@@ -252,6 +335,8 @@ class Sandbox:
         # Extract overlay changes to the active workspace via CoW
         if result.overlay_path and result.overlay_path.exists():
             import shutil
+
+            from pulse.sandbox.errors import SandboxConcurrentModificationError
             try:
                 tx = None
                 for item in result.overlay_path.rglob("*"):
@@ -266,8 +351,13 @@ class Sandbox:
                             self.stage_write(tx, str(rel_path), content.decode("utf-8", errors="replace"))
                         except ValueError:
                             pass
-                if tx and tx.operations:
-                    self.commit_transaction(tx)
+                if tx and tx.staged_changes:
+                    try:
+                        self.commit_transaction(tx)
+                    except SandboxConcurrentModificationError as e:
+                        # Overlay commit conflicted with external changes
+                        self.logger.record(action="commit_overlay", target=str(e.path), decision="deny", reason="concurrent_modification")
+                        self.discard_transaction(tx)
             finally:
                 shutil.rmtree(result.overlay_path, ignore_errors=True)
 
@@ -281,6 +371,8 @@ class Sandbox:
             truncated=result.truncated,
             pid=result.pid,
             overlay_path=None,  # Consumed and cleaned up
+            metrics=result.metrics,
+            termination_reason=result.termination_reason,
         )
 
     # -----------------------------------------------------------------------

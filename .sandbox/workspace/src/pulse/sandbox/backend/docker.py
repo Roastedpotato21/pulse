@@ -15,13 +15,22 @@ Security hardening (CoW bypass fix):
 from __future__ import annotations
 
 import asyncio
+import shlex
 import shutil
+import sys
 import tempfile
 import uuid
 from pathlib import Path
 
+from pulse.sandbox.network import NetworkEnforcementLevel, NetworkMode, NetworkPolicy
 from pulse.sandbox.process import ProcessManager, ProcessResult
-from pulse.sandbox.resources import ResourceLimits
+from pulse.sandbox.resources import ResourceLimits, ResourcePolicy
+from pulse.sandbox.secrets import (
+    SecretEnforcementLevel,
+    SecretMode,
+    SecretPolicy,
+    build_isolated_environment,
+)
 
 
 class DockerBackend:
@@ -62,14 +71,44 @@ class DockerBackend:
             return True
         return False
 
+    def get_network_enforcement_capability(self, policy: NetworkPolicy) -> NetworkEnforcementLevel:
+        """Determine what level of security this backend can enforce for the policy.
+        
+        Docker without root/iptables capabilities can only strictly enforce
+        DENY_ALL and LOCALHOST_ONLY (container loopback) via --network none.
+        ALLOWLIST and PROXY cannot be strictly enforced against raw sockets.
+        """
+        if not policy or policy.mode == NetworkMode.ALLOW_ALL:
+            return NetworkEnforcementLevel.STRONGLY_ENFORCED
+            
+        if policy.mode in (NetworkMode.DENY_ALL, NetworkMode.LOCALHOST_ONLY):
+            return NetworkEnforcementLevel.STRONGLY_ENFORCED
+            
+        return NetworkEnforcementLevel.UNSUPPORTED
+
+    def get_secret_enforcement_capability(self, policy: SecretPolicy) -> SecretEnforcementLevel:
+        """Determine if this backend can strongly enforce the requested secret isolation policy.
+        
+        Docker without root/mounts naturally isolates the host filesystem and environment,
+        making it trivial to enforce DENY_ALL and ALLOW_EXPLICIT cleanly.
+        """
+        if not policy or policy.mode == SecretMode.ALLOW_ALL:
+            return SecretEnforcementLevel.STRONGLY_ENFORCED
+            
+        if policy.mode in (SecretMode.DENY_ALL, SecretMode.ALLOW_EXPLICIT):
+            return SecretEnforcementLevel.STRONGLY_ENFORCED
+            
+        return SecretEnforcementLevel.UNSUPPORTED
+
     def build_docker_cmd(
         self,
         command: str | list[str],
         workspace_root: Path,
         cwd: Path | None = None,
         env: dict[str, str] | None = None,
-        limits: ResourceLimits | None = None,
-        network_enabled: bool = False,
+        limits: ResourceLimits | ResourcePolicy | None = None,
+        network_policy: NetworkPolicy | None = None,
+        secret_policy: SecretPolicy | None = None,
         cidfile: Path | None = None,
     ) -> list[str]:
         """Construct the exact `docker run` or `podman run` CLI arguments.
@@ -125,28 +164,39 @@ class DockerBackend:
             cmd_args.insert(2, f"--cidfile={cidfile.as_posix()}")
 
         # Network isolation flag
-        if not network_enabled:
+        if not network_policy or network_policy.mode in (NetworkMode.DENY_ALL, NetworkMode.LOCALHOST_ONLY):
             cmd_args.extend(["--network", "none"])
+        # Note: PROXY and ALLOWLIST modes are UNSUPPORTED and will be rejected by api.py
+        # before reaching here, so no fake enforcement is applied.
 
         # Resource limits flags
         if limits:
-            if limits.max_memory_bytes > 0:
-                cmd_args.extend(["--memory", f"{limits.max_memory_bytes}b"])
-                # Prevent swap exhaustion: set swap limit equal to memory limit
-                cmd_args.extend(["--memory-swap", f"{limits.max_memory_bytes}b"])
-            if limits.max_pids > 0:
-                cmd_args.extend(["--pids-limit", str(limits.max_pids)])
-            # CPU limiting
-            if limits.max_cpu_percent > 0 and limits.max_cpu_percent < 100:
+            policy = limits if isinstance(limits, ResourcePolicy) else limits.to_policy()
+            if policy.memory_bytes:
+                cmd_args.extend(["--memory", f"{policy.memory_bytes}b"])
+            if policy.swap_bytes:
+                cmd_args.extend(["--memory-swap", f"{policy.swap_bytes}b"])
+            if policy.max_processes:
+                cmd_args.extend(["--pids-limit", str(policy.max_processes)])
+            # File descriptor limit (Finding #4)
+            if policy.max_open_files:
+                cmd_args.extend(["--ulimit", f"nofile={policy.max_open_files}:{policy.max_open_files}"])
+            # CPU time hard-kill limit
+            if policy.cpu_time_seconds is not None:
+                cpu_secs = max(1, int(policy.cpu_time_seconds))
+                cmd_args.extend(["--ulimit", f"cpu={cpu_secs}:{cpu_secs}"])
+            # CPU quota (percentage throttling)
+            if 0 < policy.cpu_quota_percent < 100:
                 cpu_period = 100000  # 100ms default
-                cpu_quota = int(cpu_period * limits.max_cpu_percent / 100.0)
+                cpu_quota = int(cpu_period * policy.cpu_quota_percent / 100.0)
                 cmd_args.extend(["--cpu-period", str(cpu_period)])
                 cmd_args.extend(["--cpu-quota", str(cpu_quota)])
 
-        # Environment variables
-        if env:
-            for k, v in env.items():
-                cmd_args.extend(["-e", f"{k}={v}"])
+        # Environment variables isolation
+        # Completely construct the isolated environment using Phase 8 policy
+        safe_env = build_isolated_environment(secret_policy, extra_env=env)
+        for k, v in safe_env.items():
+            cmd_args.extend(["--env", f"{k}={v}"])
 
         # Image and target command
         cmd_args.append(self.image)
@@ -163,8 +213,9 @@ class DockerBackend:
         workspace_root: Path,
         cwd: Path | None = None,
         env: dict[str, str] | None = None,
-        limits: ResourceLimits | None = None,
-        network_enabled: bool = False,
+        limits: ResourceLimits | ResourcePolicy | None = None,
+        network_policy: NetworkPolicy | None = None,
+        secret_policy: SecretPolicy | None = None,
     ) -> ProcessResult:
         if not await self.is_available():
             return ProcessResult(
@@ -190,29 +241,21 @@ class DockerBackend:
             cwd=cwd,
             env=env,
             limits=limits,
-            network_enabled=network_enabled,
+            network_policy=network_policy,
+            secret_policy=secret_policy,
             cidfile=cidfile,
         )
 
         try:
             result = await self.process_manager.execute(docker_cmd, cwd=workspace_root, limits=limits)
-            
+
             # Extract overlay if container ID was captured
             if cidfile.exists():
                 cid = cidfile.read_text(encoding="utf-8").strip()
                 if cid:
                     overlay_extract_dir.mkdir(parents=True, exist_ok=True)
-                    # docker cp <cid>:/workspace-overlay/. <extract_dir>
-                    # Note: /workspace-overlay might just be empty if untouched, but docker cp needs careful handling
-                    # We copy the directory contents
-                    cp_cmd = [engine, "cp", f"{cid}:/workspace-overlay", str(overlay_extract_dir)]
-                    proc = await asyncio.create_subprocess_exec(
-                        *cp_cmd,
-                        stdout=asyncio.subprocess.DEVNULL,
-                        stderr=asyncio.subprocess.DEVNULL,
-                    )
-                    await proc.wait()
-                    
+                    await self._extract_overlay(engine, cid, overlay_extract_dir)
+
                     # Remove the container now that we've extracted
                     rm_cmd = [engine, "rm", "-f", cid]
                     rm_proc = await asyncio.create_subprocess_exec(
@@ -221,7 +264,7 @@ class DockerBackend:
                         stderr=asyncio.subprocess.DEVNULL,
                     )
                     await rm_proc.wait()
-            
+
             # Create a new result with the overlay path
             return ProcessResult(
                 command=result.command,
@@ -235,9 +278,66 @@ class DockerBackend:
                 overlay_path=overlay_extract_dir if overlay_extract_dir.exists() else None
             )
         finally:
+            # Always clean temporary files (Finding #3 — cleanup hardening)
             if cidfile.exists():
                 try:
                     cidfile.unlink()
+                except OSError:
+                    pass
+            # Clean overlay dir only if it has no useful content
+            # (caller is responsible for using/cleaning overlay_path from result)
+
+    @staticmethod
+    async def _extract_overlay(engine: str, cid: str, dest: Path) -> None:
+        """Securely extract overlay files from container to host.
+
+        Security architecture (Finding #3):
+            - On POSIX: pipes ``docker cp`` through ``tar`` with safety flags
+              ``--no-same-owner`` and ``--no-same-permissions`` to strip
+              container UID/GID and apply the host user's umask.
+            - On Windows: uses direct ``docker cp`` (tar piping unavailable).
+            - Post-extraction: validates all extracted paths stay within
+              the destination directory.  Any escaping files are removed.
+        """
+        if sys.platform != "win32":
+            # Stream through tar with explicit safety flags
+            safe_dest = shlex.quote(str(dest))
+            safe_cid = shlex.quote(cid)
+            cp_cmd_str = (
+                f"{engine} cp {safe_cid}:/workspace-overlay/. - "
+                f"| tar --no-same-owner --no-same-permissions -xf - -C {safe_dest}"
+            )
+            proc = await asyncio.create_subprocess_shell(
+                cp_cmd_str,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await proc.wait()
+        else:
+            cp_cmd = [engine, "cp", f"{cid}:/workspace-overlay/.", str(dest)]
+            proc = await asyncio.create_subprocess_exec(
+                *cp_cmd,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await proc.wait()
+
+        # Post-extraction validation: remove any file that escaped dest
+        resolved_dest = dest.resolve()
+        for item in list(dest.rglob("*")):
+            try:
+                if not item.resolve().is_relative_to(resolved_dest):
+                    if item.is_dir():
+                        shutil.rmtree(item, ignore_errors=True)
+                    else:
+                        item.unlink(missing_ok=True)
+            except (OSError, ValueError):
+                # If we can't resolve, remove defensively
+                try:
+                    if item.is_dir():
+                        shutil.rmtree(item, ignore_errors=True)
+                    else:
+                        item.unlink(missing_ok=True)
                 except OSError:
                     pass
 

@@ -13,8 +13,58 @@ Security hardening (ReDoS remediation):
 
 from __future__ import annotations
 
+import os
 import re
 import threading
+from dataclasses import dataclass, field
+from enum import Enum
+
+
+class SecretMode(Enum):
+    DENY_ALL = "deny_all"
+    ALLOW_EXPLICIT = "allow_explicit"
+    ALLOW_ALL = "allow_all"
+
+
+class SecretEnforcementLevel(Enum):
+    STRONGLY_ENFORCED = "strongly_enforced"
+    UNSUPPORTED = "unsupported"
+
+
+@dataclass(frozen=True, slots=True)
+class SecretPolicy:
+    """Policy declaring how host secrets should be passed to the sandbox."""
+    mode: SecretMode = SecretMode.DENY_ALL
+    explicit_env: dict[str, str] = field(default_factory=dict)
+
+
+def build_isolated_environment(
+    policy: SecretPolicy | None = None, 
+    extra_env: dict[str, str] | None = None
+) -> dict[str, str]:
+    """Construct an isolated environment preventing wholesale host credential inheritance."""
+    # Start with a pristine minimal environment (do NOT merge os.environ by default)
+    isolated = {
+        "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "HOME": "/workspace",
+        "TMPDIR": "/tmp",
+    }
+    
+    if policy is None:
+        policy = SecretPolicy()
+        
+    if policy.mode == SecretMode.ALLOW_ALL:
+        # Development override: inherit host env
+        isolated = dict(os.environ)
+        
+    elif policy.mode == SecretMode.ALLOW_EXPLICIT:
+        isolated.update(policy.explicit_env)
+        
+    # Apply execution-specific non-secret overrides
+    if extra_env:
+        isolated.update(extra_env)
+        
+    return isolated
 
 
 class SecretScrubber:
@@ -99,8 +149,8 @@ class SecretScrubber:
         worker.join(timeout=self._REDACT_TIMEOUT_SECONDS)
 
         if worker.is_alive():
-            # Timeout — return text with warning marker rather than blocking forever
-            return text + "\n[SCRUB_TIMEOUT: redaction exceeded time limit]"
+            # Timeout — return generic redaction marker rather than plaintext (fail-closed)
+            return "[REDACTED_DUE_TO_TIMEOUT: redaction exceeded time limit]"
 
         if error_container:
             # Unexpected error — return text with error marker

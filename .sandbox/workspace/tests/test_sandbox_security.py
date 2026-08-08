@@ -318,7 +318,7 @@ async def test_sandbox_host_fallback_explicit_optin(tmp_path: Path):
     workspace.mkdir()
 
     # Explicitly provide HostBackend + shell-allow policy to simulate opt-in scenario
-    policy = SandboxPolicy(default_decisions={"shell": PolicyDecision.ALLOW})
+    policy = SandboxPolicy(default_decisions={"shell": PolicyDecision.ALLOW, "network": PolicyDecision.ALLOW, "secrets": PolicyDecision.ALLOW})
     sandbox = Sandbox(workspace, backend=HostBackend(), unsafe_host_execution=True, policy=policy)
     result = await sandbox.execute_command([sys.executable, "-c", "print('host_ok')"])
     assert result.exit_code == 0
@@ -455,9 +455,10 @@ def test_concurrent_transactions_isolated(tmp_path: Path):
     sandbox.commit_transaction(tx1)
     assert file.read_text(encoding="utf-8") == "modified_by_tx1"
 
-    # Commit tx2 overwrites
-    sandbox.commit_transaction(tx2)
-    assert file.read_text(encoding="utf-8") == "modified_by_tx2"
+    # Commit tx2 MUST FAIL due to optimistic concurrency control (R2 fix)
+    from pulse.sandbox.errors import SandboxConcurrentModificationError
+    with pytest.raises(SandboxConcurrentModificationError):
+        sandbox.commit_transaction(tx2)
 
 
 # ---------------------------------------------------------------------------

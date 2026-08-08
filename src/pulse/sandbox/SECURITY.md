@@ -2,6 +2,26 @@
 
 ## Architecture Overview
 
+## Phase 6: Resource Governance
+
+Every backend receives an immutable `ResourcePolicy`; callers never need
+backend-specific limit flags. `ResourceController` applies portable
+wall-clock deadlines, cancellation handling, bounded combined stdout/stderr,
+and execution metrics. Docker/Podman maps memory, swap, PID, and CPU quota to
+cgroup flags; POSIX host execution maps memory, CPU time, process, open-file,
+and file-size limits to `setrlimit`.
+
+Each process runs in a dedicated process group. On timeout, output exhaustion,
+or cancellation the manager sends a graceful termination signal, waits for the
+configured grace period, then force-kills the complete process tree if needed.
+`ProcessResult.metrics` exposes elapsed time, child CPU usage, peak memory
+(when available), output bytes, exit status, and a stable termination reason.
+
+Windows has no POSIX `setrlimit`; timeout/output protections remain enforced
+and process-tree cleanup uses `taskkill /T /F`. Docker limits require a
+compatible engine and host cgroup configuration. Host execution remains an
+explicitly unsafe development-only fallback.
+
 ```mermaid
 graph TD
     A["Agent / Caller"] --> B["Sandbox API Facade<br/>(api.py)"]
@@ -44,6 +64,8 @@ graph TD
 | 11 | **Swap Exhaustion** — process uses swap after memory limit | Medium | `--memory-swap` set equal to `--memory` in Docker. | `docker.py` |
 | 12 | **Container Root** — process runs as root inside container | Medium | `--user 65534:65534` (nobody). | `docker.py` |
 | 13 | **Staging Exhaustion** — unlimited CoW staging files | Medium | `MAX_STAGING_SIZE_BYTES`, `MAX_STAGED_FILE_SIZE_BYTES`, `MAX_CONCURRENT_TRANSACTIONS`. | `filesystem.py` |
+| 14 | **Concurrent Commit** — external modification during CoW transaction | High | Optimistic concurrency control (inode+size+mtime+SHA256 snapshot). | `filesystem.py` |
+| 15 | **FD Exhaustion** — unlimited file descriptors in Docker | Medium | `--ulimit nofile` propagated from generic resource policy. | `docker.py` |
 
 ## Security Assumptions
 
@@ -103,4 +125,10 @@ await sandbox.initialize()
 1. **HostBackend provides NO isolation.** It is defense-in-depth only (env sanitization, rlimits, path validation). An attacker with shell access on HostBackend can escape.
 2. **Windows resource limits** are limited — `RLIMIT_NPROC`, `RLIMIT_AS`, `RLIMIT_NOFILE` are not available. Docker is strongly recommended on Windows.
 3. **`O_NOFOLLOW`** is not available on Windows. TOCTOU protection on Windows relies on `lstat`/`fstat` cross-validation of inode identity (`st_ino`, `st_dev`). This strongly mitigates but does not strictly eliminate the race window at the OS API level.
-4. **Network isolation** is only enforced in Docker (`--network none`). HostBackend cannot enforce network restrictions.
+4. **Network Isolation & Egress Control**: Network restrictions are enforced via `NetworkPolicy`.
+    - **Fail-Closed Architecture**: The Sandbox API strictly separates policy from enforcement. If the active backend cannot strongly enforce the requested network mode at the OS level, execution is rejected with a `SandboxUnsupportedPolicyError`.
+    - **DockerBackend**: `DENY_ALL` and `LOCALHOST_ONLY` are strictly enforced via `--network none`. Note that `LOCALHOST_ONLY` strictly provides access to the container's isolated loopback interface; host services are inaccessible. `ALLOWLIST` and `PROXY` are explicitly `UNSUPPORTED` in rootless Docker because it lacks native OS-level egress filtering (iptables), and thus they fail closed to prevent silent security downgrades.
+    - **HostBackend**: Cannot strictly enforce ANY network isolation. All strict policies (`DENY_ALL`, `LOCALHOST_ONLY`, `ALLOWLIST`, `PROXY`) are `UNSUPPORTED` and will fail closed.
+    - **DNS Rebinding**: `NetworkPolicy.validate_destination` automatically mitigates DNS rebinding by resolving hostnames on the host machine and verifying they do not point to internal/private IPs. This remains defense-in-depth for programmatic API calls but is not a substitute for OS-level egress filtering.
+5. **Process Group Escape** (`killpg` limitation). On POSIX, a process that calls `setsid()` or `setpgid(0, 0)` creates a new session/process group and will NOT receive termination signals sent to the original group. Container backends (Docker/Podman) provide PID-namespace isolation which securely bounds all descendants.
+6. **CoW Commit TOCTOU**. The optimistic concurrency validation in `CoWFilesystem.commit_transaction` checks file identity, size, mtime, and SHA-256 against the staging snapshot. However, there remains a tiny TOCTOU window between the validation check and the subsequent file write. This cannot be eliminated without OS-level advisory locking (which is not cross-platform reliable).

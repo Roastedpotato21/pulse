@@ -16,9 +16,16 @@ from __future__ import annotations
 import warnings
 from pathlib import Path
 
+from pulse.sandbox.network import NetworkEnforcementLevel, NetworkMode, NetworkPolicy
 from pulse.sandbox.path_validator import PathValidator
 from pulse.sandbox.process import ProcessManager, ProcessResult
 from pulse.sandbox.resources import ResourceLimits
+from pulse.sandbox.secrets import (
+    SecretEnforcementLevel,
+    SecretMode,
+    SecretPolicy,
+    build_isolated_environment,
+)
 
 # SecurityWarning is not available in all Python builds; define a fallback.
 try:
@@ -54,6 +61,27 @@ class HostBackend:
         """Host backend is always available."""
         return True
 
+    def get_network_enforcement_capability(self, policy: NetworkPolicy) -> NetworkEnforcementLevel:
+        """Determine what level of security this backend can enforce for the policy.
+        
+        HostBackend has NO network isolation capabilities. It cannot strongly enforce
+        ANY restrictive policy mode.
+        """
+        if not policy or policy.mode == NetworkMode.ALLOW_ALL:
+            return NetworkEnforcementLevel.STRONGLY_ENFORCED
+        return NetworkEnforcementLevel.UNSUPPORTED
+
+    def get_secret_enforcement_capability(self, policy: SecretPolicy) -> SecretEnforcementLevel:
+        """Determine what level of security this backend can enforce for the policy.
+        
+        HostBackend has NO filesystem/environment isolation capabilities from the host user.
+        It cannot strongly enforce DENY_ALL or ALLOW_EXPLICIT because arbitrary code
+        can read ~/.ssh or ~/.aws.
+        """
+        if not policy or policy.mode == SecretMode.ALLOW_ALL:
+            return SecretEnforcementLevel.STRONGLY_ENFORCED
+        return SecretEnforcementLevel.UNSUPPORTED
+
     async def execute(
         self,
         command: str | list[str],
@@ -61,7 +89,8 @@ class HostBackend:
         cwd: Path | None = None,
         env: dict[str, str] | None = None,
         limits: ResourceLimits | None = None,
-        network_enabled: bool = False,
+        network_policy: NetworkPolicy | None = None,
+        secret_policy: SecretPolicy | None = None,
     ) -> ProcessResult:
         """Execute command directly on host — NO CONTAINER ISOLATION.
 
@@ -80,10 +109,18 @@ class HostBackend:
         validator = PathValidator(workspace_root)
         target_dir = validator.validate_path(cwd or workspace_root)
 
+        env = env or {}
+        # Note: PROXY and ALLOWLIST are UNSUPPORTED and fail closed in api.py,
+        # so no fake proxy environment variable injection is done here.
+        
+        # Build pristine environment to prevent accidental leak, though HostBackend 
+        # cannot prevent code from actively reading host credential files.
+        safe_env = build_isolated_environment(secret_policy, extra_env=env)
+
         return await self.process_manager.execute(
             command=command,
             cwd=target_dir,
-            env=env,
+            env=safe_env,
             limits=limits,
         )
 

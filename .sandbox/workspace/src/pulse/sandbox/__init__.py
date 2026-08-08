@@ -9,6 +9,7 @@ from pulse.sandbox.api import Sandbox, SandboxSession
 from pulse.sandbox.audit import StructuredAuditEntry, StructuredAuditLogger
 from pulse.sandbox.backend import ContainerBackend, DockerBackend, HostBackend
 from pulse.sandbox.errors import (
+    SandboxConcurrentModificationError,
     SandboxResourceError,
     SandboxSecurityError,
     SandboxUnavailableError,
@@ -20,7 +21,16 @@ from pulse.sandbox.policy import ActionType, PolicyDecision, PolicyRule, Sandbox
 from pulse.sandbox.process import ProcessManager, ProcessResult
 from pulse.sandbox.project import ProjectSandbox
 from pulse.sandbox.python_safe import SafePython
-from pulse.sandbox.resources import ResourceLimiter, ResourceLimits
+from pulse.sandbox.resources import (
+    ExecutionMetrics,
+    ResourceController,
+    ResourceLimiter,
+    ResourceLimitExceeded,
+    ResourceLimits,
+    ResourceMonitor,
+    ResourcePolicy,
+    TimeoutExceeded,
+)
 from pulse.sandbox.secrets import SecretScrubber
 
 __all__ = [
@@ -29,6 +39,7 @@ __all__ = [
     "CoWTransaction",
     "ContainerBackend",
     "DockerBackend",
+    "ExecutionMetrics",
     "HostBackend",
     "PathValidationError",
     "PathValidator",
@@ -37,18 +48,23 @@ __all__ = [
     "ProcessManager",
     "ProcessResult",
     "ProjectSandbox",
+    "ResourceController",
+    "ResourceLimitExceeded",
     "ResourceLimiter",
     "ResourceLimits",
+    "ResourceMonitor",
+    "ResourcePolicy",
     "SafeGit",
     "SafePython",
     "Sandbox",
+    "SandboxConcurrentModificationError",
     "SandboxPolicy",
     "SandboxResourceError",
     "SandboxSecurityError",
     "SandboxSession",
-    # New security error types
     "SandboxUnavailableError",
     "SecretScrubber",
     "StructuredAuditEntry",
     "StructuredAuditLogger",
+    "TimeoutExceeded",
 ]

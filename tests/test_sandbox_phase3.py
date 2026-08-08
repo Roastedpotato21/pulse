@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from pulse.sandbox.backend import ContainerBackend, DockerBackend, HostBackend
+from pulse.sandbox.network import NetworkMode, NetworkPolicy
 from pulse.sandbox.resources import ResourceLimits
 
 # ---------------------------------------------------------------------------
@@ -35,7 +36,7 @@ def test_docker_backend_flag_generation(tmp_path: Path):
         cwd=tmp_path / "src",
         env={"MY_ENV": "TEST"},
         limits=limits,
-        network_enabled=False,
+        network_policy=NetworkPolicy(mode=NetworkMode.DENY_ALL),
     )
 
     cmd_str = " ".join(cmd_args)
@@ -43,7 +44,7 @@ def test_docker_backend_flag_generation(tmp_path: Path):
     assert "--network none" in cmd_str
     assert "--memory 536870912b" in cmd_str
     assert "--pids-limit 32" in cmd_str
-    assert "-e MY_ENV=TEST" in cmd_str
+    assert "--env MY_ENV=TEST" in cmd_str
     assert "python:3.11-slim sh -c python --version" in cmd_str
 
 
@@ -52,7 +53,7 @@ def test_docker_backend_network_enabled(tmp_path: Path):
     cmd_args = backend.build_docker_cmd(
         command=["pytest"],
         workspace_root=tmp_path,
-        network_enabled=True,
+        network_policy=NetworkPolicy(mode=NetworkMode.ALLOWLIST),
     )
 
     cmd_str = " ".join(cmd_args)

@@ -70,8 +70,8 @@ async def test_sandbox_facade_execute_command(tmp_path: Path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
 
-    # Requires explicit shell-allow and host backend (no Docker in test env)
-    policy = SandboxPolicy(default_decisions={"shell": PolicyDecision.ALLOW})
+    # Requires explicit shell-allow and network-allow (for HostBackend)
+    policy = SandboxPolicy(default_decisions={"shell": PolicyDecision.ALLOW, "network": PolicyDecision.ALLOW, "secrets": PolicyDecision.ALLOW})
     sandbox = Sandbox(workspace, secrets=["MY_SECRET_VAL"], backend=HostBackend(), policy=policy, unsafe_host_execution=True)
     result = await sandbox.execute_command([sys.executable, "-c", "print('SECRET: MY_SECRET_VAL')"])
 
@@ -85,8 +85,8 @@ async def test_safe_git_and_safe_python(tmp_path: Path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
 
-    # Requires explicit shell-allow and host backend for test env
-    policy = SandboxPolicy(default_decisions={"shell": PolicyDecision.ALLOW})
+    # Requires explicit shell-allow and network-allow and host backend for test env
+    policy = SandboxPolicy(default_decisions={"shell": PolicyDecision.ALLOW, "network": PolicyDecision.ALLOW, "secrets": PolicyDecision.ALLOW})
     policy.add_rule(PolicyRule(action="git", target_pattern="*", decision=PolicyDecision.ALLOW))
     policy.add_rule(PolicyRule(action="python", target_pattern="*", decision=PolicyDecision.ALLOW))
 
