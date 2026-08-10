@@ -30,6 +30,7 @@ class ContainerBackend(Protocol):
         limits: ResourceLimits | None = None,
         network_policy: NetworkPolicy | None = None,
         secret_policy: SecretPolicy | None = None,
+        execution_id: str | None = None,
     ) -> ProcessResult:
         """Run a command inside the isolated backend environment.
 
@@ -40,6 +41,8 @@ class ContainerBackend(Protocol):
             env: Environment variable overrides.
             limits: Process resource limits.
             network_policy: Execution network policy configuration.
+            secret_policy: Execution secret policy configuration.
+            execution_id: Optional UUID identifying this lifecycle execution.
 
         Returns:
             ProcessResult object containing execution status and output.
@@ -56,4 +59,8 @@ class ContainerBackend(Protocol):
 
     async def cleanup(self) -> None:
         """Reap temporary volumes, containers, or process artifacts."""
+        ...
+
+    async def reconcile(self) -> None:
+        """Clean up orphaned backend resources (e.g., leaked containers)."""
         ...

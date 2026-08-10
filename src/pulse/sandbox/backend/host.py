@@ -57,6 +57,9 @@ class HostBackend:
     def __init__(self, process_manager: ProcessManager | None = None) -> None:
         self.process_manager = process_manager or ProcessManager()
 
+    async def reconcile(self) -> None:
+        """HostBackend processes are reaped by the OS; no orphan reconciliation needed."""
+
     async def is_available(self) -> bool:
         """Host backend is always available."""
         return True
@@ -91,6 +94,7 @@ class HostBackend:
         limits: ResourceLimits | None = None,
         network_policy: NetworkPolicy | None = None,
         secret_policy: SecretPolicy | None = None,
+        execution_id: str | None = None,
     ) -> ProcessResult:
         """Execute command directly on host — NO CONTAINER ISOLATION.
 

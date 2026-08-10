@@ -63,6 +63,32 @@ class DockerBackend:
         self._engine = container_engine
         self.process_manager = process_manager or ProcessManager()
 
+    async def reconcile(self) -> None:
+        """Startup reconciliation to aggressively reap orphaned Pulse containers.
+
+        Queries the engine for containers labeled with `pulse.sandbox.managed=true`
+        and force-removes them. This guarantees no leftover processes consume resources.
+        """
+        engine = self._engine
+        if not engine:
+            if shutil.which("podman"): engine = "podman"
+            elif shutil.which("docker"): engine = "docker"
+            else: return
+
+        find_cmd = f"{engine} ps -a -q --filter label=pulse.sandbox.managed=true"
+        proc = await asyncio.create_subprocess_shell(
+            find_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL
+        )
+        stdout, _ = await proc.communicate()
+        cids = stdout.decode().strip().split()
+        
+        if cids:
+            rm_cmd = f"{engine} rm -f " + " ".join(cids)
+            rm_proc = await asyncio.create_subprocess_shell(
+                rm_cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
+            )
+            await rm_proc.wait()
+
     @property
     def name(self) -> str:
         return self._engine or "docker"
@@ -139,6 +165,7 @@ class DockerBackend:
         secret_policy: SecretPolicy | None = None,
         cidfile: Path | None = None,
         env_file_path: Path | None = None,
+        execution_id: str | None = None,
     ) -> list[str]:
         """Construct the exact `docker run` or `podman run` CLI arguments.
 
@@ -194,21 +221,28 @@ class DockerBackend:
         if cidfile:
             cmd_args.insert(2, f"--cidfile={cidfile.as_posix()}")
 
+        if execution_id:
+            cmd_args.extend(["--label", f"pulse.sandbox.execution_id={execution_id}"])
+
         # Network isolation flag
         if not network_policy or network_policy.mode in (NetworkMode.DENY_ALL, NetworkMode.LOCALHOST_ONLY):
             cmd_args.extend(["--network", "none"])
-        # Note: PROXY and ALLOWLIST modes are UNSUPPORTED and will be rejected by api.py
-        # before reaching here, so no fake enforcement is applied.
 
         # Resource limits flags
         if limits:
             policy = limits if isinstance(limits, ResourcePolicy) else limits.to_policy()
             if policy.memory_bytes:
-                cmd_args.extend(["--memory", f"{policy.memory_bytes}b"])
-            if policy.swap_bytes:
-                cmd_args.extend(["--memory-swap", f"{policy.swap_bytes}b"])
+                cmd_args.extend(["--memory", f"{policy.memory_bytes}b", "--memory-swap", f"{policy.memory_bytes}b"])
             if policy.max_processes:
-                cmd_args.extend(["--pids-limit", str(policy.max_processes)])
+                cmd_args.extend(["--pids-limit", f"{policy.max_processes}"])
+            if policy.cpu_quota_percent:
+                cpus = max(0.01, policy.cpu_quota_percent / 100.0)
+                cmd_args.extend(["--cpus", f"{cpus}"])
+            if policy.disk_bytes:
+                # --storage-opt size= relies on overlayfs backing (xfs/btrfs).
+                # Podman supports it natively in most overlay setups. Docker supports it with xfs pquota.
+                # If unsupported by the daemon, execution will gracefully fail closed during startup.
+                cmd_args.extend(["--storage-opt", f"size={policy.disk_bytes}"])
             # File descriptor limit (Finding #4)
             if policy.max_open_files:
                 cmd_args.extend(["--ulimit", f"nofile={policy.max_open_files}:{policy.max_open_files}"])
@@ -216,12 +250,6 @@ class DockerBackend:
             if policy.cpu_time_seconds is not None:
                 cpu_secs = max(1, int(policy.cpu_time_seconds))
                 cmd_args.extend(["--ulimit", f"cpu={cpu_secs}:{cpu_secs}"])
-            # CPU quota (percentage throttling)
-            if 0 < policy.cpu_quota_percent < 100:
-                cpu_period = 100000  # 100ms default
-                cpu_quota = int(cpu_period * policy.cpu_quota_percent / 100.0)
-                cmd_args.extend(["--cpu-period", str(cpu_period)])
-                cmd_args.extend(["--cpu-quota", str(cpu_quota)])
 
         # Environment variables isolation — injected via --env-file to prevent
         # secrets from leaking through the host process table (ps aux).
@@ -253,6 +281,7 @@ class DockerBackend:
         limits: ResourceLimits | ResourcePolicy | None = None,
         network_policy: NetworkPolicy | None = None,
         secret_policy: SecretPolicy | None = None,
+        execution_id: str | None = None,
     ) -> ProcessResult:
         if not await self.is_available():
             return ProcessResult(
@@ -268,7 +297,7 @@ class DockerBackend:
         tmp_base = Path(tempfile.gettempdir()) / "pulse_sandbox"
         tmp_base.mkdir(parents=True, exist_ok=True)
         
-        tx_id = str(uuid.uuid4())
+        tx_id = execution_id or str(uuid.uuid4())
         cidfile = tmp_base / f"{tx_id}.cid"
         overlay_extract_dir = tmp_base / f"{tx_id}_overlay"
         env_file_path = tmp_base / f"{tx_id}.env"
@@ -283,6 +312,7 @@ class DockerBackend:
             secret_policy=secret_policy,
             cidfile=cidfile,
             env_file_path=env_file_path,
+            execution_id=tx_id,
         )
 
         try:
@@ -328,8 +358,6 @@ class DockerBackend:
                     env_file_path.unlink(missing_ok=True)
                 except OSError:
                     pass
-            # Clean overlay dir only if it has no useful content
-            # (caller is responsible for using/cleaning overlay_path from result)
 
     @staticmethod
     async def _extract_overlay(engine: str, cid: str, dest: Path) -> None:
@@ -387,3 +415,4 @@ class DockerBackend:
 
     async def cleanup(self) -> None:
         await self.process_manager.terminate_all()
+        await self.reconcile()

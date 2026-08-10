@@ -173,9 +173,10 @@ class ResourceLimits:
     timeout_seconds: float = 30.0
     max_output_bytes: int = 5_242_880
     max_file_read_bytes: int = 52_428_800
+    max_storage_bytes: int | None = None
 
     def to_policy(self) -> ResourcePolicy:
-        return ResourcePolicy(cpu_quota_percent=self.max_cpu_percent, memory_bytes=self.max_memory_bytes, swap_bytes=self.max_memory_bytes, max_processes=self.max_pids, max_open_files=self.max_open_files, max_output_bytes=self.max_output_bytes, wall_time_seconds=self.timeout_seconds)
+        return ResourcePolicy(cpu_quota_percent=self.max_cpu_percent, memory_bytes=self.max_memory_bytes, swap_bytes=self.max_memory_bytes, max_processes=self.max_pids, max_open_files=self.max_open_files, max_output_bytes=self.max_output_bytes, wall_time_seconds=self.timeout_seconds, disk_bytes=self.max_storage_bytes)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -188,7 +189,8 @@ class ResourceLimiter:
         self.limits = limits if isinstance(limits, ResourceLimits) else ResourceLimits(
             max_memory_bytes=self.policy.memory_bytes or 0, max_cpu_percent=self.policy.cpu_quota_percent,
             max_pids=self.policy.max_processes or 0, max_open_files=self.policy.max_open_files or 0,
-            timeout_seconds=self.policy.wall_time_seconds, max_output_bytes=self.policy.max_output_bytes)
+            timeout_seconds=self.policy.wall_time_seconds, max_output_bytes=self.policy.max_output_bytes,
+            max_storage_bytes=self.policy.disk_bytes)
         self.controller = ResourceController(self.policy)
 
     def make_preexec_fn(self) -> Any | None:
