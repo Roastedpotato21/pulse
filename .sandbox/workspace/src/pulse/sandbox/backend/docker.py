@@ -10,13 +10,21 @@ Security hardening (CoW bypass fix):
     - --memory-swap equal to --memory prevents swap exhaustion.
     - --user 65534:65534 (nobody) prevents container root execution.
     - --cpu-quota/--cpu-period for CPU limiting.
+
+Security hardening (secret leakage fix):
+    - Environment variables are injected via --env-file instead of --env CLI args.
+    - This prevents secrets from leaking through the host process table (ps aux).
+    - The env file is created with restrictive permissions (0o600 on POSIX).
+    - The env file is deleted in a finally block after docker run starts.
 """
 
 from __future__ import annotations
 
 import asyncio
+import os
 import shlex
 import shutil
+import stat
 import sys
 import tempfile
 import uuid
@@ -100,6 +108,26 @@ class DockerBackend:
             
         return SecretEnforcementLevel.UNSUPPORTED
 
+    @staticmethod
+    def _write_env_file(env: dict[str, str], path: Path) -> None:
+        """Write environment variables to a file for --env-file injection.
+
+        Security architecture:
+            - File is created with restrictive permissions (0o600 on POSIX)
+              to prevent other host users from reading secrets.
+            - Values are written as KEY=VALUE, one per line.
+            - The caller is responsible for deleting the file after use.
+        """
+        # Open with restrictive permissions on POSIX; on Windows os.open
+        # ignores the mode but the file is user-owned by default.
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+        fd = os.open(str(path), flags, stat.S_IRUSR | stat.S_IWUSR)
+        try:
+            lines = [f"{k}={v}\n" for k, v in env.items()]
+            os.write(fd, "".join(lines).encode("utf-8"))
+        finally:
+            os.close(fd)
+
     def build_docker_cmd(
         self,
         command: str | list[str],
@@ -110,6 +138,7 @@ class DockerBackend:
         network_policy: NetworkPolicy | None = None,
         secret_policy: SecretPolicy | None = None,
         cidfile: Path | None = None,
+        env_file_path: Path | None = None,
     ) -> list[str]:
         """Construct the exact `docker run` or `podman run` CLI arguments.
 
@@ -121,6 +150,8 @@ class DockerBackend:
             5. No new privileges (--security-opt=no-new-privileges:true).
             6. User is nobody (65534:65534) — no root in container.
             7. Memory-swap equals memory — prevents swap exhaustion.
+            8. Environment injected via --env-file — prevents secret leakage
+               through the host process table (ps aux).
         """
         engine = self._engine or "docker"
         workspace_abs = str(workspace_root.resolve())
@@ -192,11 +223,17 @@ class DockerBackend:
                 cmd_args.extend(["--cpu-period", str(cpu_period)])
                 cmd_args.extend(["--cpu-quota", str(cpu_quota)])
 
-        # Environment variables isolation
-        # Completely construct the isolated environment using Phase 8 policy
+        # Environment variables isolation — injected via --env-file to prevent
+        # secrets from leaking through the host process table (ps aux).
         safe_env = build_isolated_environment(secret_policy, extra_env=env)
-        for k, v in safe_env.items():
-            cmd_args.extend(["--env", f"{k}={v}"])
+        if env_file_path:
+            self._write_env_file(safe_env, env_file_path)
+            cmd_args.extend(["--env-file", str(env_file_path)])
+        else:
+            # Fallback for unit tests calling build_docker_cmd() directly
+            # without an env_file_path — uses non-secret minimal env only.
+            for k, v in safe_env.items():
+                cmd_args.extend(["--env", f"{k}={v}"])
 
         # Image and target command
         cmd_args.append(self.image)
@@ -234,6 +271,7 @@ class DockerBackend:
         tx_id = str(uuid.uuid4())
         cidfile = tmp_base / f"{tx_id}.cid"
         overlay_extract_dir = tmp_base / f"{tx_id}_overlay"
+        env_file_path = tmp_base / f"{tx_id}.env"
         
         docker_cmd = self.build_docker_cmd(
             command=command,
@@ -244,6 +282,7 @@ class DockerBackend:
             network_policy=network_policy,
             secret_policy=secret_policy,
             cidfile=cidfile,
+            env_file_path=env_file_path,
         )
 
         try:
@@ -281,7 +320,12 @@ class DockerBackend:
             # Always clean temporary files (Finding #3 — cleanup hardening)
             if cidfile.exists():
                 try:
-                    cidfile.unlink()
+                    cidfile.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            if env_file_path.exists():
+                try:
+                    env_file_path.unlink(missing_ok=True)
                 except OSError:
                     pass
             # Clean overlay dir only if it has no useful content

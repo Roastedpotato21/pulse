@@ -388,6 +388,17 @@ class Sandbox:
             self.audit_logger.record(action="write", target=relative_path, decision="deny", detail="Policy denied write access")
             raise PermissionError(f"Policy denied write access to '{relative_path}'")
 
+        if self.scrubber.contains_explicit_secret(content):
+            from pulse.sandbox.errors import SandboxSecurityError
+            self.audit_logger.record(
+                action="write", target=relative_path, decision="deny", 
+                detail="Commit rejected: explicitly authorized secret found in staged file."
+            )
+            raise SandboxSecurityError(
+                "Commit rejected: explicitly authorized secret found in staged file.",
+                operation="stage_write", path=relative_path
+            )
+
         path = self.cow.stage_write(tx, relative_path, content)
         self.audit_logger.record(action="write-staged", target=relative_path, decision=decision.value)
         return path

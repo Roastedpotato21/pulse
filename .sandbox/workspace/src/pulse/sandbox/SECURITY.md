@@ -40,6 +40,18 @@ graph TD
     G --> N["MutationTracker<br/>(mutations.py)"]
 ```
 
+## Phase 8: Secret & Credential Isolation
+
+To prevent wholesale host credential inheritance and prevent secrets from leaking into logs or executing code, the Sandbox enforces strict secret policies:
+- `SecretPolicy` modes:
+  - `DENY_ALL` (Default): The sandbox receives a pristine minimal environment (`PATH`, `HOME`, `TMPDIR`). Host variables are aggressively dropped.
+  - `ALLOW_EXPLICIT`: Allows explicitly passing an allowlisted dictionary of environment variables.
+  - `ALLOW_ALL`: Inherits the full host environment. Intended for local development or explicitly unsafe execution.
+- **Backend Enforcement**:
+  - `DockerBackend`: Strongly enforces environment isolation using container boundaries.
+  - `HostBackend`: Cannot enforce `DENY_ALL` or `ALLOW_EXPLICIT` safely without side effects; therefore, it will fail closed (`SandboxUnsupportedPolicyError`) unless explicitly running with `ALLOW_ALL` (e.g., via `unsafe_host_execution=True`).
+- **Automated Scrubber**: `SecretScrubber` redacts sensitive strings and uses ReDoS-safe patterns to proactively sanitize logs, terminal output, and audit trails. Execution boundaries are guarded with strict timeouts to prevent adversarial regex blocking.
+
 ## Threat Model
 
 ### Adversary Profile
@@ -66,6 +78,8 @@ graph TD
 | 13 | **Staging Exhaustion** — unlimited CoW staging files | Medium | `MAX_STAGING_SIZE_BYTES`, `MAX_STAGED_FILE_SIZE_BYTES`, `MAX_CONCURRENT_TRANSACTIONS`. | `filesystem.py` |
 | 14 | **Concurrent Commit** — external modification during CoW transaction | High | Optimistic concurrency control (inode+size+mtime+SHA256 snapshot). | `filesystem.py` |
 | 15 | **FD Exhaustion** — unlimited file descriptors in Docker | Medium | `--ulimit nofile` propagated from generic resource policy. | `docker.py` |
+| 16 | **Credential Leakage** — host env variables inherited by generated code | Critical | `DENY_ALL` drops host environment. `HostBackend` fails closed if enforcement requested. | `api.py`, `secrets.py` |
+| 17 | **Secret Exfiltration in Logs** — API keys printed to stdout by sandbox | High | `SecretScrubber` strips patterns (ReDoS-safe) and exact values before audit/return. | `secrets.py` |
 
 ## Security Assumptions
 

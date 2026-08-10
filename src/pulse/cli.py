@@ -698,7 +698,7 @@ def _handle_interactive_mode(auth, agent, runtime=None) -> None:
             real_stdout = sys.stdout
             sys.stdout = captured
             try:
-                with thinking_spinner("Thinking"):
+                with thinking_spinner():
                     agent.ask(user_input, auto_approve_reads=True)
             finally:
                 sys.stdout = real_stdout

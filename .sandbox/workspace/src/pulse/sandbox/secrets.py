@@ -158,6 +158,20 @@ class SecretScrubber:
 
         return result_container[0] if result_container else text
 
+    def contains_explicit_secret(self, text: str) -> bool:
+        """Check if the text contains any of the explicitly registered secrets.
+        
+        This only checks for the exact secret strings provided during authorization,
+        preventing false positives that might occur with generic regex patterns.
+        """
+        if not text or not self._exact_secrets:
+            return False
+            
+        for secret in self._exact_secrets:
+            if secret in text:
+                return True
+        return False
+
     def _redact_impl(self, text: str) -> str:
         """Internal redaction without timeout guard."""
         scrubbed = text
