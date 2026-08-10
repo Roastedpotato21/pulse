@@ -95,7 +95,7 @@ Your selected active provider and model are permanently stored in `.agent/provid
 | `pulse.mutations` | File mutation tracking, snapshots, diffs, and rollback |
 | `pulse.rpc` | JSON-RPC 2.0 WebSocket adapter for IDE clients |
 | `pulse.audit` | Session action log |
-| `pulse.sandbox` | Workspace permission boundary |
+| `pulse.sandbox` | Workspace permission boundary with advanced lifecycle states and resource exhaustion protections |
 | `pulse.config` | Project config, `.agent/provider.json` and `.env` loading |
 | `pulse.tool_registry` | Async Tool interface, permission gates, and concurrent dispatch |
 | `pulse.tools` | Built-in tools: status, doctor, edit, rollback, mutations, verify, git |
