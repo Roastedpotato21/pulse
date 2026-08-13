@@ -1,5 +1,6 @@
 import asyncio
 import os
+import random
 
 import pytest
 import websockets
@@ -7,8 +8,6 @@ import websockets
 from pulse.sandbox.remote.client import RemoteClient
 from pulse.sandbox.remote.server import RemoteServer
 
-
-import random
 
 @pytest.fixture
 async def remote_server():
@@ -26,7 +25,7 @@ async def remote_server():
         pass
 @pytest.mark.asyncio
 async def test_auth_success(remote_server):
-    server, port = remote_server
+    _, port = remote_server
     client = RemoteClient(endpoint_url=f"ws://127.0.0.1:{port}", auth_token="test-token1")
     await client.connect()
     # If connect succeeds without raising, we are good
@@ -34,7 +33,7 @@ async def test_auth_success(remote_server):
 
 @pytest.mark.asyncio
 async def test_auth_failure(remote_server):
-    server, port = remote_server
+    _, port = remote_server
     client = RemoteClient(endpoint_url=f"ws://127.0.0.1:{port}", auth_token="wrong-token")
     with pytest.raises(websockets.exceptions.InvalidStatus) as exc:
         await client.connect()
@@ -42,7 +41,7 @@ async def test_auth_failure(remote_server):
 
 @pytest.mark.asyncio
 async def test_multi_tenant(remote_server):
-    server, port = remote_server
+    _, port = remote_server
     client1 = RemoteClient(endpoint_url=f"ws://127.0.0.1:{port}", auth_token="test-token1")
     client2 = RemoteClient(endpoint_url=f"ws://127.0.0.1:{port}", auth_token="test-token2")
     await client1.connect()
