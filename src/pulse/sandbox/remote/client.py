@@ -8,7 +8,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Any, AsyncGenerator
+from collections.abc import AsyncGenerator
+from typing import Any
 
 import websockets
 
@@ -41,8 +42,8 @@ class RemoteClient(RemoteSandboxClient):
             
         headers = {"Authorization": f"Bearer {self.auth_token}"}
         
-        import ssl
         import os
+        import ssl
         ssl_context = None
         if os.environ.get("PULSE_REMOTE_INSECURE") != "1" and self.endpoint_url.startswith("wss://"):
             try:
@@ -50,7 +51,7 @@ class RemoteClient(RemoteSandboxClient):
                 # In development, you might disable strict verification if needed:
                 # ssl_context.check_hostname = False
                 # ssl_context.verify_mode = ssl.CERT_NONE
-            except Exception:
+            except (ssl.SSLError, OSError):
                 logger.warning("Failed to create TLS context.")
                 
         self._ws = await websockets.connect(
@@ -64,8 +65,9 @@ class RemoteClient(RemoteSandboxClient):
 
     async def disconnect(self) -> None:
         """Close the WebSocket connection."""
-        if self._ws and not self._ws.closed:
+        if self._ws:
             await self._ws.close()
+            self._ws = None
         if self._listener_task:
             self._listener_task.cancel()
 
@@ -115,7 +117,7 @@ class RemoteClient(RemoteSandboxClient):
                     elif msg_type == "error":
                         logger.error(f"Remote server error: {payload}")
                         
-                except Exception as e:
+                except (KeyError, ValueError, RuntimeError) as e:
                     logger.error(f"Error processing server message: {e}")
         except websockets.exceptions.ConnectionClosed:
             logger.info("Connection to remote server closed.")

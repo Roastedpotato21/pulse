@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import signal
 import sys
+import typing
 from dataclasses import dataclass
 from pathlib import Path
-import typing
 from typing import Any
 
 from pulse.sandbox.resources import (
@@ -17,6 +18,8 @@ from pulse.sandbox.resources import (
     ResourceLimits,
     ResourcePolicy,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,8 +118,8 @@ class ProcessManager:
                     if output_callback:
                         try:
                             await output_callback(name, data)
-                        except Exception:
-                            pass
+                        except OSError:
+                            logger.debug("output_callback failed for stream %s", name)
                     remaining = max_bytes - total
                     if remaining <= 0:
                         exceeded = True

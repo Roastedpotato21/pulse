@@ -3,17 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import typing
 import uuid
 from pathlib import Path
 
+from pulse.sandbox.errors import SandboxUnavailableError
 from pulse.sandbox.network import NetworkEnforcementLevel, NetworkPolicy
 from pulse.sandbox.process import ProcessResult
 from pulse.sandbox.remote.client import RemoteClient
 from pulse.sandbox.remote.models import SubmitExecutionRequest
 from pulse.sandbox.resources import ResourceLimits
 from pulse.sandbox.secrets import SecretEnforcementLevel, SecretPolicy
-from pulse.sandbox.errors import SandboxUnavailableError
-import typing
 
 
 class RemoteSandboxBackend:
@@ -51,7 +51,7 @@ class RemoteSandboxBackend:
             await client.connect()
             await client.disconnect()
             return True
-        except Exception:
+        except (OSError, ConnectionError):
             return False
 
     async def execute(
@@ -148,19 +148,20 @@ class RemoteSandboxBackend:
                     current_size = 0
                     for member in tar.getmembers():
                         if member.issym() or member.islnk():
-                            raise Exception("Symlinks are not allowed in remote artifacts")
+                            from pulse.sandbox.errors import SandboxSecurityError
+                            raise SandboxSecurityError("Symlinks are not allowed in remote artifacts")
                         current_size += member.size
                         if current_size > max_size:
-                            raise Exception(f"Artifact size exceeded limit of {max_size} bytes")
+                            raise SandboxSecurityError(f"Artifact size exceeded limit of {max_size} bytes")
                         
                         member_path = os.path.join(str(local_overlay_path), member.name)
                         if not os.path.abspath(member_path).startswith(os.path.abspath(str(local_overlay_path))):
-                            raise Exception("Path traversal detected in download_artifact")
+                            raise SandboxSecurityError("Path traversal detected in download_artifact")
                     if hasattr(tarfile, 'data_filter'):
                         tar.extractall(path=local_overlay_path, filter='data')
                     else:
                         tar.extractall(path=local_overlay_path)
-            except Exception as e:
+            except (OSError, ValueError, RuntimeError) as e:
                 from pulse.sandbox.errors import SandboxSecurityError
                 # Raise an explicit security error on path traversal
                 raise SandboxSecurityError(

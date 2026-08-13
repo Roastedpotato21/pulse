@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 import typing
+from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 from pulse.sandbox.network import NetworkEnforcementLevel, NetworkPolicy

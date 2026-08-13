@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import typing
-from typing import Protocol, AsyncGenerator
+from collections.abc import AsyncGenerator
+from typing import Protocol
 
 from pulse.sandbox.remote.models import (
     ExecutionResultModel,

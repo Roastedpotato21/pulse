@@ -58,4 +58,4 @@ jobs:
       - name: Inspect Docker health
         run: docker info
       - name: Run live Docker sandbox security tests
-        run: uv run pytest tests/test_sandbox*.py
+        run: uv run pytest tests/ -k sandbox

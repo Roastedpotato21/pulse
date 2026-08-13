@@ -5,9 +5,11 @@ Wraps the DockerBackend to securely execute commands on behalf of the RemoteServ
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import typing
 from pathlib import Path
+from typing import Any
 
 from pulse.sandbox.backend.docker import DockerBackend
 from pulse.sandbox.network import NetworkPolicy
@@ -89,7 +91,7 @@ class RemoteWorker:
                 termination_reason=result.termination_reason,
             )
             
-        except Exception as e:
+        except (OSError, RuntimeError, asyncio.CancelledError) as e:
             logger.error(f"Worker execution failed: {e}")
             return ExecutionResultModel(
                 execution_id=req.execution_id,

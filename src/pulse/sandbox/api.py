@@ -147,6 +147,7 @@ class Sandbox:
             
         # Try remote backend if local docker is unavailable
         import os
+
         from pulse.sandbox.backend.remote import RemoteSandboxBackend
         
         remote_url = os.environ.get("PULSE_REMOTE_URL")

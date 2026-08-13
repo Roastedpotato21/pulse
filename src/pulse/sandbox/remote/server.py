@@ -55,15 +55,15 @@ class RemoteServer:
         await self.worker.initialize()
         
         # Phase 3: TLS Enforcement
-        import ssl
         import os
+        import ssl
         ssl_context = None
         if os.environ.get("PULSE_REMOTE_INSECURE") != "1":
             try:
                 # In a real environment, this should load specific certs
                 ssl_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
                 # For development, you'd load a cert here, e.g., ssl_context.load_cert_chain(...)
-            except Exception:
+            except (ssl.SSLError, OSError):
                 logger.warning("Failed to create TLS context. Set PULSE_REMOTE_INSECURE=1 for dev.")
                 
         async with websockets.serve(
@@ -107,7 +107,7 @@ class RemoteServer:
                     }))
                 except websockets.exceptions.ConnectionClosed:
                     pass
-            except Exception as e:
+            except (OSError, RuntimeError) as e:
                 logger.error(f"Execution failed: {e}")
                 try:
                     await websocket.send(json.dumps({
@@ -177,8 +177,8 @@ class RemoteServer:
                             
                     elif action == "upload_artifact":
                         import base64
-                        import tarfile
                         import io
+                        import tarfile
                         execution_id = payload.get("execution_id")
                         b64_data = payload.get("data")
                         if execution_id and b64_data:
@@ -188,12 +188,16 @@ class RemoteServer:
                                 workspace.mkdir(parents=True, exist_ok=True)
                                 with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
                                     import os
+
+                                    from pulse.sandbox.errors import (
+                                        SandboxSecurityError,
+                                    )
                                     for member in tar.getmembers():
                                         if member.issym() or member.islnk():
-                                            raise Exception("Symlinks are not allowed in remote artifacts")
+                                            raise SandboxSecurityError("Symlinks are not allowed in remote artifacts")
                                         member_path = os.path.join(str(workspace), member.name)
                                         if not os.path.abspath(member_path).startswith(os.path.abspath(str(workspace))):
-                                            raise Exception("Path traversal detected in upload_artifact")
+                                            raise SandboxSecurityError("Path traversal detected in upload_artifact")
                                     # use data filter if available, else extractall (we checked manually above)
                                     if hasattr(tarfile, 'data_filter'):
                                         tar.extractall(path=workspace, filter='data')
@@ -203,14 +207,14 @@ class RemoteServer:
                                     "type": "response", 
                                     "payload": {"status": "UPLOADED"}
                                 }))
-                            except Exception as e:
+                            except (OSError, ValueError, RuntimeError) as e:
                                 logger.error(f"Failed to extract artifact: {e}")
                                 await websocket.send(json.dumps({"type": "error", "payload": f"Upload failed: {e}"}))
                     
                     elif action == "download_artifact":
                         import base64
-                        import tarfile
                         import io
+                        import tarfile
                         execution_id = payload.get("execution_id")
                         if execution_id:
                             overlay_path = self.worker.get_overlay_path(execution_id)
@@ -252,7 +256,7 @@ class RemoteServer:
                             "payload": f"Unknown action: {action}"
                         }))
                         
-                except Exception as e:
+                except (KeyError, ValueError, OSError, RuntimeError) as e:
                     logger.error(f"Error processing message: {e}")
                     await websocket.send(json.dumps({"type": "error", "payload": str(e)}))
         except websockets.exceptions.ConnectionClosed:

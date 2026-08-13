@@ -1,12 +1,16 @@
 import asyncio
 import os
+
 import pytest
 import websockets
-from pulse.sandbox.remote.server import RemoteServer
+
 from pulse.sandbox.remote.client import RemoteClient
+from pulse.sandbox.remote.server import RemoteServer
+
 
 @pytest.fixture
 async def remote_server():
+    os.environ["PULSE_REMOTE_INSECURE"] = "1"
     server = RemoteServer(port=8081, auth_token="test-token1,test-token2")
     task = asyncio.create_task(server.start())
     # give it a moment to start
@@ -16,7 +20,6 @@ async def remote_server():
 
 @pytest.mark.asyncio
 async def test_auth_success(remote_server):
-    os.environ["PULSE_REMOTE_INSECURE"] = "1"
     client = RemoteClient(endpoint_url="ws://127.0.0.1:8081", auth_token="test-token1")
     await client.connect()
     # If connect succeeds without raising, we are good
@@ -24,15 +27,13 @@ async def test_auth_success(remote_server):
 
 @pytest.mark.asyncio
 async def test_auth_failure(remote_server):
-    os.environ["PULSE_REMOTE_INSECURE"] = "1"
     client = RemoteClient(endpoint_url="ws://127.0.0.1:8081", auth_token="wrong-token")
-    with pytest.raises(websockets.exceptions.InvalidStatusCode) as exc:
+    with pytest.raises(websockets.exceptions.InvalidStatus) as exc:
         await client.connect()
-    assert exc.value.status_code == 401
+    assert exc.value.response.status_code == 401
 
 @pytest.mark.asyncio
 async def test_multi_tenant(remote_server):
-    os.environ["PULSE_REMOTE_INSECURE"] = "1"
     client1 = RemoteClient(endpoint_url="ws://127.0.0.1:8081", auth_token="test-token1")
     client2 = RemoteClient(endpoint_url="ws://127.0.0.1:8081", auth_token="test-token2")
     await client1.connect()
