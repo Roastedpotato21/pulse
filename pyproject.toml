@@ -17,6 +17,7 @@ dependencies = [
 [project.scripts]
 pulse = "pulse.cli:main"
 pulse-rpc = "pulse.rpc:main"
+pulse-remote = "pulse.sandbox.remote.server:main"
 
 [tool.uv]
 package = true

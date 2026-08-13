@@ -27,6 +27,7 @@ import shutil
 import stat
 import sys
 import tempfile
+import typing
 import uuid
 from pathlib import Path
 
@@ -282,6 +283,7 @@ class DockerBackend:
         network_policy: NetworkPolicy | None = None,
         secret_policy: SecretPolicy | None = None,
         execution_id: str | None = None,
+        output_callback: typing.Callable[[str, bytes], typing.Awaitable[None]] | None = None,
     ) -> ProcessResult:
         if not await self.is_available():
             return ProcessResult(
@@ -316,7 +318,7 @@ class DockerBackend:
         )
 
         try:
-            result = await self.process_manager.execute(docker_cmd, cwd=workspace_root, limits=limits)
+            result = await self.process_manager.execute(docker_cmd, cwd=workspace_root, limits=limits, output_callback=output_callback)
 
             # Extract overlay if container ID was captured
             if cidfile.exists():

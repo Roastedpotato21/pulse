@@ -8,6 +8,7 @@ import signal
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+import typing
 from typing import Any
 
 from pulse.sandbox.resources import (
@@ -43,7 +44,7 @@ class ProcessManager:
     def active_count(self) -> int:
         return len(self._active_processes)
 
-    async def execute(self, command: str | list[str], cwd: Path | str | None = None, env: dict[str, str] | None = None, limits: ResourceLimits | ResourcePolicy | None = None) -> ProcessResult:
+    async def execute(self, command: str | list[str], cwd: Path | str | None = None, env: dict[str, str] | None = None, limits: ResourceLimits | ResourcePolicy | None = None, output_callback: typing.Callable[[str, bytes], typing.Awaitable[None]] | None = None) -> ProcessResult:
         controller = ResourceController(limits if isinstance(limits, ResourcePolicy) else (limits or ResourceLimits()).to_policy())
         policy = controller.policy
         cmd_str = command if isinstance(command, str) else " ".join(command)
@@ -65,7 +66,7 @@ class ProcessManager:
                 proc = await asyncio.create_subprocess_exec(command[0], *command[1:], stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, cwd=str(cwd) if cwd else None, env=controller.sanitize_env(env), **extra_kwargs)
             self._active_processes.add(proc)
             try:
-                stdout, stderr, output_limited = await asyncio.wait_for(self._collect_output(proc, policy.max_output_bytes), timeout=policy.wall_time_seconds)
+                stdout, stderr, output_limited = await asyncio.wait_for(self._collect_output(proc, policy.max_output_bytes, output_callback), timeout=policy.wall_time_seconds)
                 if output_limited:
                     reason = "output_limit"
             except TimeoutError:
@@ -99,7 +100,7 @@ class ProcessManager:
                 clean_stderr += marker
         return ProcessResult(cmd_str, exit_code, clean_stdout, clean_stderr, metrics.elapsed_ms, reason == "timeout", stdout_truncated or stderr_truncated or reason == "output_limit", proc.pid if proc else None, metrics=metrics, termination_reason=reason)
 
-    async def _collect_output(self, proc: asyncio.subprocess.Process, max_bytes: int) -> tuple[bytes, bytes, bool]:
+    async def _collect_output(self, proc: asyncio.subprocess.Process, max_bytes: int, output_callback: typing.Callable[[str, bytes], typing.Awaitable[None]] | None = None) -> tuple[bytes, bytes, bool]:
         chunks: dict[str, list[bytes]] = {"stdout": [], "stderr": []}
         total = 0
         exceeded = False
@@ -111,6 +112,11 @@ class ProcessManager:
                 return
             while data := await stream.read(65_536):
                 async with lock:
+                    if output_callback:
+                        try:
+                            await output_callback(name, data)
+                        except Exception:
+                            pass
                     remaining = max_bytes - total
                     if remaining <= 0:
                         exceeded = True

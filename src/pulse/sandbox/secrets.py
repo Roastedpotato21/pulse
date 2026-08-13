@@ -18,6 +18,7 @@ import re
 import threading
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import Any
 
 
 class SecretMode(Enum):
@@ -36,6 +37,24 @@ class SecretPolicy:
     """Policy declaring how host secrets should be passed to the sandbox."""
     mode: SecretMode = SecretMode.DENY_ALL
     explicit_env: dict[str, str] = field(default_factory=dict)
+    
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "mode": self.mode.value,
+            "explicit_env": self.explicit_env,
+        }
+        
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> SecretPolicy:
+        mode_str = str(data.get("mode", "deny_all")).lower()
+        try:
+            mode = SecretMode(mode_str)
+        except ValueError:
+            mode = SecretMode.DENY_ALL
+        return cls(
+            mode=mode,
+            explicit_env=data.get("explicit_env", {})
+        )
 
 
 def build_isolated_environment(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import typing
 from typing import Protocol, runtime_checkable
 
 from pulse.sandbox.network import NetworkEnforcementLevel, NetworkPolicy
@@ -31,6 +32,7 @@ class ContainerBackend(Protocol):
         network_policy: NetworkPolicy | None = None,
         secret_policy: SecretPolicy | None = None,
         execution_id: str | None = None,
+        output_callback: typing.Callable[[str, bytes], typing.Awaitable[None]] | None = None,
     ) -> ProcessResult:
         """Run a command inside the isolated backend environment.
 

@@ -95,7 +95,7 @@ Your selected active provider and model are permanently stored in `.agent/provid
 | `pulse.mutations` | File mutation tracking, snapshots, diffs, and rollback |
 | `pulse.rpc` | JSON-RPC 2.0 WebSocket adapter for IDE clients |
 | `pulse.audit` | Session action log |
-| `pulse.sandbox` | Workspace permission boundary with advanced lifecycle states and resource exhaustion protections |
+| `pulse.sandbox` | Workspace permission boundary with local Docker and Remote Sandbox execution (`pulse-remote`) |
 | `pulse.config` | Project config, `.agent/provider.json` and `.env` loading |
 | `pulse.tool_registry` | Async Tool interface, permission gates, and concurrent dispatch |
 | `pulse.tools` | Built-in tools: status, doctor, edit, rollback, mutations, verify, git |
@@ -206,6 +206,40 @@ GOOGLE_REDIRECT_URI=http://localhost:8080
 pulse login          # Open Google sign-in in your browser
 pulse logout         # Sign out and clear stored tokens
 pulse whoami         # Show your name, email, and username
+```
+
+---
+
+## Remote Sandbox Execution (`pulse-remote`)
+
+Pulse supports remote code execution via `RemoteSandboxBackend` when local Docker/Podman is unavailable. This ensures untrusted AI code is never executed unsafely on the local host without explicit user opt-in (`unsafe_host_execution=True`).
+
+### Architecture & Features
+- **Strict Isolation**: The remote worker wraps `DockerBackend` on a dedicated remote host, preserving container capabilities (`--cap-drop=ALL`), read-only root filesystems, and memory/CPU limits.
+- **Authenticated Transport**: Secures client-server communication using Bearer token authentication and TLS (`wss://`).
+- **Multi-Tenant Isolation**: Scopes executions by tenant ID derived from authentication tokens.
+- **Copy-on-Write Workspace Sync**: Encapsulates workspace edits in compressed `.tar.gz` overlays with strict symlink and path traversal (ZipSlip) protections.
+
+### Server Setup
+
+Start the remote worker service on an isolated host with Docker running:
+
+```bash
+export PULSE_REMOTE_HOST="0.0.0.0"
+export PULSE_REMOTE_PORT="8080"
+export PULSE_REMOTE_TOKEN="your-secure-token"
+
+# Run the remote server daemon
+pulse-remote
+```
+
+### Client Configuration
+
+Configure Pulse on local machines to delegate isolated execution to the remote server:
+
+```bash
+export PULSE_REMOTE_URL="wss://remote-server:8080"
+export PULSE_REMOTE_TOKEN="your-secure-token"
 ```
 
 ---

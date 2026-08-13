@@ -144,6 +144,27 @@ class Sandbox:
                 detail=f"Secure container backend '{docker_be.name}' initialized.",
             )
             return
+            
+        # Try remote backend if local docker is unavailable
+        import os
+        from pulse.sandbox.backend.remote import RemoteSandboxBackend
+        
+        remote_url = os.environ.get("PULSE_REMOTE_URL")
+        remote_token = os.environ.get("PULSE_REMOTE_TOKEN")
+        remote_be = RemoteSandboxBackend(endpoint_url=remote_url, auth_token=remote_token)
+        
+        if await remote_be.is_available():
+            self.backend = remote_be
+            self._initialized = True
+            await self.backend.reconcile()
+            self.audit_logger.record(
+                action="sandbox-init",
+                target=remote_be.name,
+                decision="allow",
+                isolation_level="container",
+                detail=f"Secure remote backend '{remote_be.name}' initialized via environment config.",
+            )
+            return
 
         # No container engine available
         if self._unsafe_host_execution:
