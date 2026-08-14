@@ -315,16 +315,31 @@ PULSE_MAX_SESSION_COST=1.00
 
 ## VS Code Extension
 
-The extension (`vscode-extension/`) connects to the Pulse backend over **stdio JSON-RPC** (`PulseRpcClient`) rather than WebSocket - no server process required.
+**Pulse Studio for VS Code** is a modern, feature-rich local client for the Pulse JSON-RPC server. The extension (`vscode-extension/`) supports both **stdio JSON-RPC** (`PulseRpcClient`, no server required) and **WebSocket** (`ws://127.0.0.1:8765` via `pulse serve`).
+
+### Local Development Setup
+
+1. From the Pulse workspace, run `pulse serve`.
+2. In `vscode-extension/`, run `npm install` then `npm run compile`.
+3. Open `vscode-extension/` in VS Code and press `F5` to launch an Extension Development Host.
+
+Change `pulse.serverUrl` only when you intentionally run Pulse on a different local endpoint.
 
 ### Features
-- **Chat sidebar** - prompt Pulse about the workspace
-- **Inline completions** - `PulseInlineEditProvider` sends document context and renders diff suggestions
-- **Diagnostics Code Actions** - "Fix with Pulse" appears on any compiler/linter error; clicking sends the diagnostic to `pulse.explainDiagnostics` and shows the explanation inline
-- **Terminal error debugger** - when a terminal exits with a non-zero code, Pulse prompts to debug; `pulse.debugTerminalError` sends terminal context to the backend for analysis
-- **RPC methods**: `plan()`, `executeTool()`, `rollback()`, `getStatus()`, `explainDiagnostics()`, `runCommand()`, `applyPatch()`
+- **Modern Pulse Chat sidebar** — a beautifully crafted Dark Mode UI with glassmorphism; prompt Pulse about the workspace
+- **Simulated Streaming** — real-time event playback showing reasoning, planning, and task progress
+- **Agent Status** — visual indicator of what Pulse is currently doing (idle, thinking, working)
+- **Inline completions** — `PulseInlineEditProvider` sends document context and renders diff suggestions
+- **Diagnostics Code Actions** — "Fix with Pulse" appears on any compiler/linter error; clicking sends the diagnostic to `pulse.explainDiagnostics` and shows the explanation inline
+- **Terminal error debugger** — when a terminal exits with a non-zero code, Pulse prompts to debug; `pulse.debugTerminalError` sends terminal context to the backend for analysis
+- **Command Palette prompts** and workspace verification
+- **Explain and review actions** for the editor selection and Quick Fix menu
 
-Run the extension from `vscode-extension/` after `pulse serve` is running (WebSocket path) or launch it directly for the stdio-RPC path.
+### RPC Methods
+- **Stdio path**: `plan()`, `executeTool()`, `rollback()`, `getStatus()`, `explainDiagnostics()`, `runCommand()`, `applyPatch()`
+- **WebSocket path**: `pulse.health`, `pulse.askStream`, `pulse.codeAction`, `pulse.command`
+
+> **Note:** The RPC server deliberately rejects edit and rollback requests because their existing Pulse approval workflow requires an interactive terminal.
 
 ---
 
