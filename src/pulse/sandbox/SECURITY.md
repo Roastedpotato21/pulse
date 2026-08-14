@@ -7,6 +7,7 @@ We categorize security controls into Prevention, Detection, and Redaction.
 
 ### Prevention (Isolation)
 - **Containerization**: `DockerBackend` enforces process isolation, filesystem isolation, and network isolation using namespaces and cgroups. 
+- **Remote Execution**: `RemoteSandboxBackend` enables untrusted code to run on a dedicated remote host via the `pulse-remote` worker daemon. This physical/network separation prevents any host escape from affecting the local development machine, with communication secured via authenticated WSS.
 - **Secret Injection**: Secrets are explicitly injected into the container environment via temporary `--env-file` structures stored outside the workspace. This prevents argv leakage (e.g. `ps aux`) and ensures robust lifecycle cleanup.
 - **Copy-on-Write Filesystem (CoW)**: Changes are strictly staged via CoW transactions. If explicitly authorized secrets are detected in staged files, the commit is outright rejected by the security engine to prevent secret persistence in snapshots.
 - **Path Validation**: TOCTOU-safe path verification prevents directory traversal and symlink escapes.

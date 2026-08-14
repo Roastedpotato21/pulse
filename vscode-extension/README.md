@@ -10,7 +10,7 @@ Pulse Studio for VS Code is a modern, feature-rich local client for the Pulse JS
 
 The extension connects only to `ws://127.0.0.1:8765` by default. Change
 `pulse.serverUrl` only when you intentionally run Pulse on a different local
-endpoint.uv run 
+endpoint.
 
 ## Features
 
