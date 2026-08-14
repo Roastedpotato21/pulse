@@ -112,7 +112,7 @@ class Sandbox:
 
         # Backend initialization: explicit backend or deferred to initialize()
         self._backend_explicit = backend is not None
-        self.backend = backend or HostBackend()
+        self.backend = backend
         self._initialized = False
 
         self.cow = CoWFilesystem(self.workspace_root)
@@ -126,46 +126,55 @@ class Sandbox:
                with warnings and audit logging.
             3. If unavailable AND unsafe_host_execution=False: raise SandboxUnavailableError.
         """
-        if self._backend_explicit:
+        if self._backend_explicit and self.backend is not None:
             # Caller provided an explicit backend — respect it
             self._initialized = True
             return
 
-        docker_be = DockerBackend()
-        if await docker_be.is_available():
-            self.backend = docker_be
-            self._initialized = True
-            await self.backend.reconcile()
-            self.audit_logger.record(
-                action="sandbox-init",
-                target=docker_be.name,
-                decision="allow",
-                isolation_level="container",
-                detail=f"Secure container backend '{docker_be.name}' initialized.",
-            )
-            return
+        try:
+            docker_be = DockerBackend()
+            if await docker_be.is_available():
+                self.backend = docker_be
+                self._initialized = True
+                await self.backend.reconcile()
+                self.audit_logger.record(
+                    action="sandbox-init",
+                    target=docker_be.name,
+                    decision="allow",
+                    isolation_level="container",
+                    detail=f"Secure container backend '{docker_be.name}' initialized.",
+                )
+                return
+        except Exception as e:  # noqa: BLE001
+            # Catch initialization/availability errors to avoid silent fallbacks
+            import logging
+            logging.getLogger(__name__).warning("Docker backend check failed: %s", e)
             
         # Try remote backend if local docker is unavailable
-        import os
+        try:
+            import os
 
-        from pulse.sandbox.backend.remote import RemoteSandboxBackend
-        
-        remote_url = os.environ.get("PULSE_REMOTE_URL")
-        remote_token = os.environ.get("PULSE_REMOTE_TOKEN")
-        remote_be = RemoteSandboxBackend(endpoint_url=remote_url, auth_token=remote_token)
-        
-        if await remote_be.is_available():
-            self.backend = remote_be
-            self._initialized = True
-            await self.backend.reconcile()
-            self.audit_logger.record(
-                action="sandbox-init",
-                target=remote_be.name,
-                decision="allow",
-                isolation_level="container",
-                detail=f"Secure remote backend '{remote_be.name}' initialized via environment config.",
-            )
-            return
+            from pulse.sandbox.backend.remote import RemoteSandboxBackend
+            
+            remote_url = os.environ.get("PULSE_REMOTE_URL")
+            remote_token = os.environ.get("PULSE_REMOTE_TOKEN")
+            remote_be = RemoteSandboxBackend(endpoint_url=remote_url, auth_token=remote_token)
+            
+            if await remote_be.is_available():
+                self.backend = remote_be
+                self._initialized = True
+                await self.backend.reconcile()
+                self.audit_logger.record(
+                    action="sandbox-init",
+                    target=remote_be.name,
+                    decision="allow",
+                    isolation_level="container",
+                    detail=f"Secure remote backend '{remote_be.name}' initialized via environment config.",
+                )
+                return
+        except Exception as e:  # noqa: BLE001
+            import logging
+            logging.getLogger(__name__).warning("Remote backend check failed: %s", e)
 
         # No container engine available
         if self._unsafe_host_execution:
@@ -197,10 +206,15 @@ class Sandbox:
             isolation_level="unavailable",
             detail="No secure backend available and unsafe_host_execution=False.",
         )
-        raise SandboxUnavailableError()
+        raise SandboxUnavailableError(
+            "No secure backend available (Docker and Remote are missing or unreachable), "
+            "and unsafe host fallback is disabled."
+        )
 
     def _get_isolation_level(self) -> str:
         """Determine the current isolation level for audit logging."""
+        if not self.backend:
+            return "unavailable"
         if isinstance(self.backend, HostBackend) or getattr(
             self.backend, "is_unsafe", False
         ):

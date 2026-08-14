@@ -8,8 +8,8 @@ import uuid
 from pathlib import Path
 
 from pulse.sandbox.errors import SandboxUnavailableError
-from pulse.sandbox.network import NetworkEnforcementLevel, NetworkPolicy
-from pulse.sandbox.process import ProcessResult
+from pulse.sandbox.network import NetworkEnforcementLevel, NetworkMode, NetworkPolicy
+from pulse.sandbox.process import ProcessEnforcementLevel, ProcessResult
 from pulse.sandbox.remote.client import RemoteClient
 from pulse.sandbox.remote.models import SubmitExecutionRequest
 from pulse.sandbox.resources import ResourceLimits
@@ -185,7 +185,6 @@ class RemoteSandboxBackend:
 
     def get_network_enforcement_capability(self, policy: NetworkPolicy) -> NetworkEnforcementLevel:
         """Determine if this backend can strongly enforce the requested network policy."""
-        from pulse.sandbox.network import NetworkMode
         if not policy or policy.mode == NetworkMode.ALLOW_ALL:
             return NetworkEnforcementLevel.STRONGLY_ENFORCED
             
@@ -204,6 +203,13 @@ class RemoteSandboxBackend:
             return SecretEnforcementLevel.STRONGLY_ENFORCED
             
         return SecretEnforcementLevel.UNSUPPORTED
+
+    def get_process_containment_capability(self) -> ProcessEnforcementLevel:
+        """Determine if this backend provides strong process containment.
+        
+        Delegated to remote DockerBackend.
+        """
+        return ProcessEnforcementLevel.STRONGLY_ENFORCED
 
     async def cleanup(self) -> None:
         """Reap temporary remote execution artifacts."""

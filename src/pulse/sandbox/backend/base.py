@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 from pulse.sandbox.network import NetworkEnforcementLevel, NetworkPolicy
-from pulse.sandbox.process import ProcessResult
+from pulse.sandbox.process import ProcessEnforcementLevel, ProcessResult
 from pulse.sandbox.resources import ResourceLimits
 from pulse.sandbox.secrets import SecretEnforcementLevel, SecretPolicy
 
@@ -57,6 +57,10 @@ class ContainerBackend(Protocol):
 
     def get_secret_enforcement_capability(self, policy: SecretPolicy) -> SecretEnforcementLevel:
         """Determine if this backend can strongly enforce the requested secret isolation policy."""
+        ...
+
+    def get_process_containment_capability(self) -> ProcessEnforcementLevel:
+        """Determine if this backend provides strong process containment."""
         ...
 
     async def cleanup(self) -> None:

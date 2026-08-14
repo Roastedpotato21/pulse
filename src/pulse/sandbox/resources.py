@@ -145,6 +145,21 @@ class ResourceController:
                     pass
 
         def preexec() -> None:
+            # P1 Linux process containment parent-death protection
+            if sys.platform.startswith("linux"):
+                import ctypes
+                import signal
+                try:
+                    libc = ctypes.CDLL("libc.so.6")
+                    # PR_SET_PDEATHSIG is 1
+                    res = libc.prctl(1, signal.SIGKILL)
+                    if res != 0:
+                        import sys
+                        print(f"pulse: warning: Failed to set PR_SET_PDEATHSIG (prctl returned {res})", file=sys.stderr)
+                except Exception as e:  # noqa: BLE001
+                    import sys
+                    print(f"pulse: warning: Failed to load libc for PR_SET_PDEATHSIG: {e}", file=sys.stderr)
+
             if hasattr(resource, "RLIMIT_NPROC"):
                 set_limit(resource.RLIMIT_NPROC, policy.max_processes)
             if hasattr(resource, "RLIMIT_NOFILE"):

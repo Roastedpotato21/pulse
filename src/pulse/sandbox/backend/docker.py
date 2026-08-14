@@ -32,7 +32,7 @@ import uuid
 from pathlib import Path
 
 from pulse.sandbox.network import NetworkEnforcementLevel, NetworkMode, NetworkPolicy
-from pulse.sandbox.process import ProcessManager, ProcessResult
+from pulse.sandbox.process import ProcessEnforcementLevel, ProcessManager, ProcessResult
 from pulse.sandbox.resources import ResourceLimits, ResourcePolicy
 from pulse.sandbox.secrets import (
     SecretEnforcementLevel,
@@ -134,6 +134,14 @@ class DockerBackend:
             return SecretEnforcementLevel.STRONGLY_ENFORCED
             
         return SecretEnforcementLevel.UNSUPPORTED
+
+    def get_process_containment_capability(self) -> ProcessEnforcementLevel:
+        """Determine if this backend provides strong process containment.
+        
+        Docker leverages Linux namespaces and cgroups to strongly contain
+        processes, regardless of daemonization/setsid behavior.
+        """
+        return ProcessEnforcementLevel.STRONGLY_ENFORCED
 
     @staticmethod
     def _write_env_file(env: dict[str, str], path: Path) -> None:

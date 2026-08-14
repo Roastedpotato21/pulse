@@ -660,3 +660,151 @@ async def test_container_overlay_extraction(tmp_path: Path):
     new_file = workspace / "new_file.txt"
     assert new_file.exists()
     assert new_file.read_text(encoding="utf-8").strip() == "extracted_content"
+
+
+# ---------------------------------------------------------------------------
+# 17. HostBackend Production Safety Remediation (P0)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.anyio
+async def test_docker_unavailable_no_implicit_host_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Verify HostBackend is not selected automatically when Docker is missing."""
+    from pulse.sandbox.backend.docker import DockerBackend
+    
+    async def mock_is_available(self):
+        return False
+        
+    monkeypatch.setattr(DockerBackend, "is_available", mock_is_available)
+    
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    
+    sandbox = Sandbox(workspace, unsafe_host_execution=False)
+    assert sandbox.backend is None  # Should not be initialized implicitly
+    
+    with pytest.raises(SandboxUnavailableError) as exc_info:
+        await sandbox.initialize()
+    assert "unsafe host fallback is disabled" in str(exc_info.value)
+    assert getattr(sandbox, "backend", None) is None
+
+
+@pytest.mark.anyio
+async def test_docker_initialization_failure_no_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Verify an exception during Docker check does not cause HostBackend fallback."""
+    from pulse.sandbox.backend.docker import DockerBackend
+    
+    async def failing_is_available(self):
+        raise RuntimeError("Docker daemon crashed")
+        
+    monkeypatch.setattr(DockerBackend, "is_available", failing_is_available)
+    
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    
+    sandbox = Sandbox(workspace, unsafe_host_execution=False)
+    with pytest.raises(SandboxUnavailableError) as exc_info:
+        await sandbox.initialize()
+    assert "unsafe host fallback is disabled" in str(exc_info.value)
+    assert sandbox.backend is None
+
+
+@pytest.mark.anyio
+async def test_remote_backend_available_selection(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Verify remote backend is selected if Docker is unavailable but remote is configured."""
+    from pulse.sandbox.backend.docker import DockerBackend
+    from pulse.sandbox.backend.remote import RemoteSandboxBackend
+    
+    async def mock_docker_available(self):
+        return False
+    monkeypatch.setattr(DockerBackend, "is_available", mock_docker_available)
+    
+    async def mock_remote_available(self):
+        return True
+    
+    async def mock_reconcile(self):
+        pass
+        
+    monkeypatch.setattr(RemoteSandboxBackend, "is_available", mock_remote_available)
+    monkeypatch.setattr(RemoteSandboxBackend, "reconcile", mock_reconcile)
+    monkeypatch.setenv("PULSE_REMOTE_URL", "wss://example.com/ws")
+    
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    
+    sandbox = Sandbox(workspace, unsafe_host_execution=False)
+    await sandbox.initialize()
+    
+    assert isinstance(sandbox.backend, RemoteSandboxBackend)
+
+
+@pytest.mark.anyio
+async def test_no_secure_backend_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Verify SandboxUnavailableError is raised with proper message."""
+    from pulse.sandbox.backend.docker import DockerBackend
+    
+    async def mock_docker_available(self):
+        return False
+    monkeypatch.setattr(DockerBackend, "is_available", mock_docker_available)
+    
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    
+    sandbox = Sandbox(workspace, unsafe_host_execution=False)
+    with pytest.raises(SandboxUnavailableError) as exc_info:
+        await sandbox.initialize()
+    
+    msg = str(exc_info.value)
+    assert "Docker and Remote are missing" in msg
+    assert "unsafe host fallback is disabled" in msg
+
+
+@pytest.mark.anyio
+async def test_explicit_unsafe_mode_works(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Verify unsafe_host_execution=True still falls back to HostBackend if needed."""
+    from pulse.sandbox.backend.docker import DockerBackend
+    
+    async def mock_docker_available(self):
+        return False
+    monkeypatch.setattr(DockerBackend, "is_available", mock_docker_available)
+    
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    
+    sandbox = Sandbox(workspace, unsafe_host_execution=True)
+    await sandbox.initialize()
+    assert isinstance(sandbox.backend, HostBackend)
+
+
+@pytest.mark.anyio
+async def test_secure_policy_against_host_backend_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Verify a strict network/secret policy against an explicitly allowed HostBackend is rejected."""
+    from pulse.sandbox.backend.docker import DockerBackend
+    from pulse.sandbox.errors import SandboxUnsupportedPolicyError
+    
+    async def mock_docker_available(self):
+        return False
+    monkeypatch.setattr(DockerBackend, "is_available", mock_docker_available)
+    
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    
+    # Enable unsafe host, but also require strict network isolation
+    from pulse.sandbox.network import NetworkMode, NetworkPolicy
+    policy = SandboxPolicy(default_decisions={"shell": PolicyDecision.ALLOW, "network": PolicyDecision.ALLOW})
+    network_policy = NetworkPolicy(mode=NetworkMode.DENY_ALL)
+    
+    sandbox = Sandbox(
+        workspace, 
+        unsafe_host_execution=True, 
+        policy=policy, 
+        network_policy=network_policy
+    )
+    await sandbox.initialize()
+    assert isinstance(sandbox.backend, HostBackend)
+    
+    # execute_command should refuse to run because HostBackend cannot strongly enforce DENY_ALL
+    with pytest.raises(SandboxUnsupportedPolicyError) as exc_info:
+        await sandbox.execute_command(["echo", "test"])
+    
+    assert "cannot strongly enforce network policy mode" in str(exc_info.value)
+

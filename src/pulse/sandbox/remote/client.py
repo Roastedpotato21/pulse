@@ -45,14 +45,21 @@ class RemoteClient(RemoteSandboxClient):
         import os
         import ssl
         ssl_context = None
-        if os.environ.get("PULSE_REMOTE_INSECURE") != "1" and self.endpoint_url.startswith("wss://"):
+        
+        tls_cert = os.environ.get("PULSE_TLS_CERT")
+        tls_key = os.environ.get("PULSE_TLS_KEY")
+        tls_ca = os.environ.get("PULSE_TLS_CA")
+        
+        if self.endpoint_url.startswith("wss://"):
+            if not (tls_cert and tls_key and tls_ca):
+                raise ValueError("mTLS certificates (PULSE_TLS_CERT, PULSE_TLS_KEY, PULSE_TLS_CA) are required for wss://")
             try:
-                ssl_context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
-                # In development, you might disable strict verification if needed:
-                # ssl_context.check_hostname = False
-                # ssl_context.verify_mode = ssl.CERT_NONE
-            except (ssl.SSLError, OSError):
-                logger.warning("Failed to create TLS context.")
+                ssl_context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH, cafile=tls_ca)
+                ssl_context.load_cert_chain(certfile=tls_cert, keyfile=tls_key)
+            except (ssl.SSLError, OSError) as e:
+                raise RuntimeError(f"Failed to load mTLS certificates: {e}")
+        elif not ("127.0.0.1" in self.endpoint_url or "localhost" in self.endpoint_url or "[::1]" in self.endpoint_url):
+            raise RuntimeError("Insecure ws:// connections are only allowed for loopback (127.0.0.1).")
                 
         self._ws = await websockets.connect(
             self.endpoint_url, 

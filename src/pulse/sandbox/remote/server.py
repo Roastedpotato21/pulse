@@ -58,13 +58,26 @@ class RemoteServer:
         import os
         import ssl
         ssl_context = None
-        if os.environ.get("PULSE_REMOTE_INSECURE") != "1":
+        
+        tls_cert = os.environ.get("PULSE_TLS_CERT")
+        tls_key = os.environ.get("PULSE_TLS_KEY")
+        tls_ca = os.environ.get("PULSE_TLS_CA")
+        
+        if tls_cert and tls_key and tls_ca:
             try:
-                # In a real environment, this should load specific certs
                 ssl_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
-                # For development, you'd load a cert here, e.g., ssl_context.load_cert_chain(...)
-            except (ssl.SSLError, OSError):
-                logger.warning("Failed to create TLS context. Set PULSE_REMOTE_INSECURE=1 for dev.")
+                ssl_context.load_cert_chain(certfile=tls_cert, keyfile=tls_key)
+                ssl_context.load_verify_locations(cafile=tls_ca)
+                ssl_context.verify_mode = ssl.CERT_REQUIRED
+            except (ssl.SSLError, OSError) as e:
+                raise RuntimeError(f"Failed to load mTLS certificates: {e}")
+        elif self.host in ("127.0.0.1", "localhost", "::1"):
+            logger.warning("Starting in insecure loopback mode without mTLS.")
+        else:
+            raise RuntimeError(
+                "mTLS certificates (PULSE_TLS_CERT, PULSE_TLS_KEY, PULSE_TLS_CA) "
+                "are strictly required for non-loopback connections."
+            )
                 
         async with websockets.serve(
             self._handle_client, 

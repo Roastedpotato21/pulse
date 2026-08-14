@@ -9,8 +9,17 @@ import signal
 import sys
 import typing
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Any
+
+
+class ProcessEnforcementLevel(str, Enum):
+    """Degrees to which process containment can be guaranteed."""
+    UNSUPPORTED = "unsupported"
+    BEST_EFFORT = "best_effort"
+    STRONGLY_ENFORCED = "strongly_enforced"
+
 
 from pulse.sandbox.resources import (
     ExecutionMetrics,

@@ -353,3 +353,103 @@ async def test_docker_autocommit_uses_staged_changes(tmp_path: Path):
     # The file should now exist in the real workspace because auto-commit succeeded
     assert (workspace / "nested" / "file.txt").exists()
     assert (workspace / "nested" / "file.txt").read_text().strip() == "success"
+
+
+# ---------------------------------------------------------------------------
+# P1: PDEATHSIG and Process Containment
+# ---------------------------------------------------------------------------
+
+@pytest.mark.anyio
+async def test_process_normal_execution(tmp_path: Path):
+    """Verify normal execution completes correctly."""
+    from pulse.sandbox.process import ProcessManager
+    pm = ProcessManager()
+    import sys
+    result = await pm.execute([sys.executable, "-c", "print('hello')"], cwd=tmp_path)
+    assert result.exit_code == 0
+    assert "hello" in result.stdout
+
+
+@pytest.mark.anyio
+async def test_process_cancellation(tmp_path: Path):
+    """Verify asyncio cancellation terminates the process."""
+    from pulse.sandbox.process import ProcessManager
+    import asyncio
+    pm = ProcessManager()
+    
+    async def run():
+        return await pm.execute([sys.executable, "-c", "import time; time.sleep(999)"], cwd=tmp_path)
+        
+    task = asyncio.create_task(run())
+    await asyncio.sleep(0.5)
+    task.cancel()
+    
+    with pytest.raises(asyncio.CancelledError):
+        await task
+        
+
+@pytest.mark.anyio
+async def test_process_timeout(tmp_path: Path):
+    """Verify timeout terminates the process."""
+    from pulse.sandbox.process import ProcessManager
+    from pulse.sandbox.resources import ResourcePolicy
+    pm = ProcessManager()
+    result = await pm.execute([sys.executable, "-c", "import time; time.sleep(999)"], cwd=tmp_path, limits=ResourcePolicy(wall_time_seconds=0.5))
+    assert result.timed_out
+
+
+@pytest.mark.anyio
+async def test_linux_pdeathsig_receives_signal(tmp_path: Path):
+    """Verify PDEATHSIG kills child when parent crashes."""
+    if not sys.platform.startswith("linux"):
+        pytest.skip("PDEATHSIG is Linux-specific")
+        
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    
+    script = """
+import os
+import signal
+import sys
+import time
+
+with open("child_pid.txt", "w") as f:
+    f.write(str(os.getpid()))
+
+time.sleep(999)
+"""
+    (workspace / "child.py").write_text(script)
+    
+    parent_script = """
+import asyncio
+from pathlib import Path
+import sys
+import os
+from pulse.sandbox.api import Sandbox
+from pulse.sandbox.backend.host import HostBackend
+from pulse.sandbox.policy import SandboxPolicy, PolicyDecision
+
+async def main():
+    from pulse.sandbox.process import ProcessManager
+    pm = ProcessManager()
+    task = asyncio.create_task(pm.execute([sys.executable, "child.py"], cwd=Path(".")))
+    await asyncio.sleep(1)
+    os._exit(1)
+
+asyncio.run(main())
+"""
+    (workspace / "parent.py").write_text(parent_script)
+    
+    import subprocess
+    parent_proc = subprocess.Popen([sys.executable, "parent.py"], cwd=workspace)  # noqa: ASYNC220
+    parent_proc.wait()
+    
+    child_pid_path = workspace / "child_pid.txt"
+    if not child_pid_path.exists():
+        pytest.fail("Child did not write PID file")
+        
+    child_pid = int(child_pid_path.read_text())
+    
+    with pytest.raises(OSError):
+        os.kill(child_pid, 0)
+

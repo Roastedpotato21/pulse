@@ -18,7 +18,7 @@ from pathlib import Path
 
 from pulse.sandbox.network import NetworkEnforcementLevel, NetworkMode, NetworkPolicy
 from pulse.sandbox.path_validator import PathValidator
-from pulse.sandbox.process import ProcessManager, ProcessResult
+from pulse.sandbox.process import ProcessEnforcementLevel, ProcessManager, ProcessResult
 from pulse.sandbox.resources import ResourceLimits
 from pulse.sandbox.secrets import (
     SecretEnforcementLevel,
@@ -84,6 +84,14 @@ class HostBackend:
         if not policy or policy.mode == SecretMode.ALLOW_ALL:
             return SecretEnforcementLevel.STRONGLY_ENFORCED
         return SecretEnforcementLevel.UNSUPPORTED
+
+    def get_process_containment_capability(self) -> ProcessEnforcementLevel:
+        """Determine if this backend provides strong process containment.
+        
+        HostBackend relies on POSIX process groups or Windows Job objects,
+        which can be escaped by descendants daemonizing (e.g. setsid).
+        """
+        return ProcessEnforcementLevel.BEST_EFFORT
 
     async def execute(
         self,
