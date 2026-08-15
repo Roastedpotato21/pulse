@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import sqlite3
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import asdict, dataclass, field
@@ -24,6 +25,13 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Enums & Data Models
 # ---------------------------------------------------------------------------
+
+
+class TaskConcurrencyError(Exception):
+    """Raised when a stale task update is rejected via OCC."""
+    def __init__(self, task_id: str):
+        super().__init__(f"Task {task_id} was modified by another process. Stale update rejected.")
+        self.task_id = task_id
 
 
 class TaskStatus(Enum):
@@ -65,6 +73,7 @@ class TaskCheckpoint:
     state_data: dict[str, Any]
     timestamp: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     metadata: dict[str, Any] = field(default_factory=dict)
+    version: int = 1
 
 
 @dataclass(slots=True)
@@ -110,6 +119,7 @@ class Task:
     result: str | None = None
     error: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    version: int = 1
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize Task object to JSON-compatible dictionary."""
@@ -130,6 +140,7 @@ class Task:
             "result": self.result,
             "error": self.error,
             "metadata": self.metadata,
+            "version": self.version,
         }
 
     @classmethod
@@ -162,6 +173,7 @@ class Task:
             result=data.get("result"),
             error=data.get("error"),
             metadata=data.get("metadata", {}),
+            version=int(data.get("version", 1)),
         )
 
 
@@ -171,37 +183,180 @@ class Task:
 
 
 class TaskStore:
-    """File-backed persistence store for Tasks and Checkpoints."""
+    """SQLite-backed persistence store for Tasks and Checkpoints."""
 
     def __init__(self, workspace: Path | None = None) -> None:
         self.workspace = workspace or Path.cwd()
         self.store_dir = self.workspace / ".pulse"
-        self.store_file = self.store_dir / "tasks.json"
+        self.store_dir.mkdir(parents=True, exist_ok=True)
+        self.store_file = self.store_dir / "tasks.sqlite3"
+        self._ensure_schema()
+        self._migrate_legacy_json()
 
-    def save(self, tasks: dict[str, Task]) -> None:
-        """Persist all tasks to tasks.json."""
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.store_file, timeout=10.0)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        return conn
+
+    def _ensure_schema(self) -> None:
+        with self._connect() as conn:
+            conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS tasks (
+                    id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    goal TEXT NOT NULL,
+                    priority TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    progress REAL NOT NULL,
+                    retries INTEGER NOT NULL,
+                    max_retries INTEGER NOT NULL,
+                    depends_on TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    result TEXT,
+                    error TEXT,
+                    metadata TEXT NOT NULL,
+                    checkpoints TEXT NOT NULL,
+                    history TEXT NOT NULL,
+                    version INTEGER NOT NULL DEFAULT 1
+                );
+                CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
+                """
+            )
+            # Safe schema migration for OCC
+            cursor = conn.execute("PRAGMA table_info(tasks)")
+            columns = [row[1] for row in cursor.fetchall()]
+            if "version" not in columns:
+                conn.execute("ALTER TABLE tasks ADD COLUMN version INTEGER NOT NULL DEFAULT 1")
+            
+
+    def _migrate_legacy_json(self) -> None:
+        legacy_file = self.store_dir / "tasks.json"
+        if not legacy_file.exists():
+            return
+            
+        # Check if tasks table is empty, if not, sqlite takes precedence
+        with self._connect() as conn:
+            cursor = conn.execute("SELECT COUNT(*) FROM tasks")
+            count = cursor.fetchone()[0]
+            if count > 0:
+                return
+                
         try:
-            self.store_dir.mkdir(parents=True, exist_ok=True)
-            data = {task_id: task.to_dict() for task_id, task in tasks.items()}
-            with self.store_file.open("w", encoding="utf-8") as f:
-                json.dumps(data, indent=2)
-                f.write(json.dumps(data, indent=2))
-        except (OSError, json.JSONDecodeError, TypeError, ValueError) as err:
-            logger.error(f"Failed to persist task store: {err}")
+            with legacy_file.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+            
+            tasks_to_migrate = {}
+            for task_id, raw in data.items():
+                if isinstance(raw, dict):
+                    tasks_to_migrate[task_id] = Task.from_dict(raw)
+                    
+            if not tasks_to_migrate:
+                return
+                
+            # Insert transactionally
+            with self._connect() as conn:
+                for task in tasks_to_migrate.values():
+                    self.create_task(task)
+                    
+            # Safe backup
+            legacy_file.rename(legacy_file.with_suffix(".json.bak"))
+        except (OSError, json.JSONDecodeError, ValueError) as err:
+            logger.error(f"Failed to migrate legacy tasks.json: {err}")
+
+    def create_task(self, task: Task) -> None:
+        """Insert a newly created task."""
+        try:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO tasks (
+                        id, title, goal, priority, status, progress, retries, 
+                        max_retries, depends_on, created_at, updated_at, 
+                        result, error, metadata, checkpoints, history, version
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        task.id, task.title, task.goal, task.priority.name,
+                        task.status.value, task.progress, task.retries,
+                        task.max_retries, json.dumps(task.depends_on),
+                        task.created_at, task.updated_at, task.result,
+                        task.error, json.dumps(task.metadata),
+                        json.dumps([asdict(cp) for cp in task.checkpoints]),
+                        json.dumps([asdict(rec) for rec in task.history]),
+                        task.version,
+                    )
+                )
+        except sqlite3.Error as err:
+            logger.error(f"Failed to create task {task.id}: {err}")
+            raise
+
+    def update_task(self, task: Task) -> None:
+        """Update an existing task safely using OCC."""
+        try:
+            with self._connect() as conn:
+                cursor = conn.execute(
+                    """
+                    UPDATE tasks SET
+                        title=?, goal=?, priority=?, status=?, progress=?,
+                        retries=?, max_retries=?, depends_on=?, created_at=?,
+                        updated_at=?, result=?, error=?, metadata=?,
+                        checkpoints=?, history=?, version=version + 1
+                    WHERE id = ? AND version = ?
+                    """,
+                    (
+                        task.title, task.goal, task.priority.name,
+                        task.status.value, task.progress, task.retries,
+                        task.max_retries, json.dumps(task.depends_on),
+                        task.created_at, task.updated_at, task.result,
+                        task.error, json.dumps(task.metadata),
+                        json.dumps([asdict(cp) for cp in task.checkpoints]),
+                        json.dumps([asdict(rec) for rec in task.history]),
+                        task.id, task.version,
+                    )
+                )
+                if cursor.rowcount == 0:
+                    raise TaskConcurrencyError(task.id)
+        except sqlite3.Error as err:
+            logger.error(f"Failed to update task {task.id}: {err}")
+            raise
 
     def load(self) -> dict[str, Task]:
-        """Load tasks from tasks.json."""
+        """Load all tasks from SQLite."""
         if not self.store_file.exists():
             return {}
+        tasks = {}
         try:
-            with self.store_file.open("r", encoding="utf-8") as f:
-                data = json.load(f)
-            return {
-                task_id: Task.from_dict(raw)
-                for task_id, raw in data.items()
-                if isinstance(raw, dict)
-            }
-        except (OSError, json.JSONDecodeError) as err:
+            with self._connect() as conn:
+                cursor = conn.execute("SELECT * FROM tasks")
+                columns = [col[0] for col in cursor.description]
+                for row in cursor.fetchall():
+                    row_dict = dict(zip(columns, row))
+                    
+                    data = {
+                        "id": row_dict["id"],
+                        "title": row_dict["title"],
+                        "goal": row_dict["goal"],
+                        "priority": row_dict["priority"],
+                        "status": row_dict["status"],
+                        "progress": row_dict["progress"],
+                        "retries": row_dict["retries"],
+                        "max_retries": row_dict["max_retries"],
+                        "depends_on": json.loads(row_dict["depends_on"]),
+                        "created_at": row_dict["created_at"],
+                        "updated_at": row_dict["updated_at"],
+                        "result": row_dict["result"],
+                        "error": row_dict["error"],
+                        "metadata": json.loads(row_dict["metadata"]),
+                        "checkpoints": json.loads(row_dict["checkpoints"]),
+                        "history": json.loads(row_dict["history"]),
+                        "version": row_dict["version"],
+                    }
+                    tasks[row_dict["id"]] = Task.from_dict(data)
+            return tasks
+        except (sqlite3.Error, json.JSONDecodeError) as err:
             logger.error(f"Failed to load task store: {err}")
             return {}
 
@@ -296,7 +451,7 @@ class TaskManager:
                 metadata=metadata or {},
             )
             self._tasks[task_id] = task
-            self._save_store()
+            self.store.create_task(task)
 
         await self._emit_event("task_created", task)
         self._log_telemetry("task_created", task_id=task_id, priority=priority.name)
@@ -314,7 +469,15 @@ class TaskManager:
             if task_id not in self._queue:
                 self._queue.append(task_id)
             self._sort_queue()
-            self._save_store()
+            try:
+                self.store.update_task(task)
+                task.version += 1
+            except TaskConcurrencyError:
+                # Reload the authoritative state from DB to heal our cache
+                fresh_tasks = self.store.load()
+                if task.id in fresh_tasks:
+                    self._tasks[task.id] = fresh_tasks[task.id]
+                raise
 
         await self._emit_event("task_queued", task)
         return task
@@ -336,7 +499,15 @@ class TaskManager:
             task.updated_at = datetime.now(UTC).isoformat()
             if task_id in self._queue:
                 self._queue.remove(task_id)
-            self._save_store()
+            try:
+                self.store.update_task(task)
+                task.version += 1
+            except TaskConcurrencyError:
+                # Reload the authoritative state from DB to heal our cache
+                fresh_tasks = self.store.load()
+                if task.id in fresh_tasks:
+                    self._tasks[task.id] = fresh_tasks[task.id]
+                raise
 
         await self._emit_event("task_started", task)
         self._log_telemetry("task_started", task_id=task_id)
@@ -356,7 +527,15 @@ class TaskManager:
                         detail=detail,
                     )
                 )
-            self._save_store()
+            try:
+                self.store.update_task(task)
+                task.version += 1
+            except TaskConcurrencyError:
+                # Reload the authoritative state from DB to heal our cache
+                fresh_tasks = self.store.load()
+                if task.id in fresh_tasks:
+                    self._tasks[task.id] = fresh_tasks[task.id]
+                raise
 
         await self._emit_event("task_progress", task, {"detail": detail})
         return task
@@ -376,7 +555,15 @@ class TaskManager:
                     detail=reason or "Task paused by user",
                 )
             )
-            self._save_store()
+            try:
+                self.store.update_task(task)
+                task.version += 1
+            except TaskConcurrencyError:
+                # Reload the authoritative state from DB to heal our cache
+                fresh_tasks = self.store.load()
+                if task.id in fresh_tasks:
+                    self._tasks[task.id] = fresh_tasks[task.id]
+                raise
 
         await self._emit_event("task_paused", task, {"reason": reason})
         self._log_telemetry("task_paused", task_id=task_id, reason=reason)
@@ -405,7 +592,15 @@ class TaskManager:
                     detail=detail,
                 )
             )
-            self._save_store()
+            try:
+                self.store.update_task(task)
+                task.version += 1
+            except TaskConcurrencyError:
+                # Reload the authoritative state from DB to heal our cache
+                fresh_tasks = self.store.load()
+                if task.id in fresh_tasks:
+                    self._tasks[task.id] = fresh_tasks[task.id]
+                raise
 
         await self._emit_event("task_resumed", task)
         self._log_telemetry("task_resumed", task_id=task_id)
@@ -426,7 +621,15 @@ class TaskManager:
                     detail=reason or "Task cancelled by user",
                 )
             )
-            self._save_store()
+            try:
+                self.store.update_task(task)
+                task.version += 1
+            except TaskConcurrencyError:
+                # Reload the authoritative state from DB to heal our cache
+                fresh_tasks = self.store.load()
+                if task.id in fresh_tasks:
+                    self._tasks[task.id] = fresh_tasks[task.id]
+                raise
 
         await self._emit_event("task_cancelled", task, {"reason": reason})
         self._log_telemetry("task_cancelled", task_id=task_id, reason=reason)
@@ -447,7 +650,15 @@ class TaskManager:
                     detail=f"Task completed: {result[:60]}",
                 )
             )
-            self._save_store()
+            try:
+                self.store.update_task(task)
+                task.version += 1
+            except TaskConcurrencyError:
+                # Reload the authoritative state from DB to heal our cache
+                fresh_tasks = self.store.load()
+                if task.id in fresh_tasks:
+                    self._tasks[task.id] = fresh_tasks[task.id]
+                raise
 
         # Update long-term memory if available
         if self.memory and hasattr(self.memory, "save_context"):
@@ -496,7 +707,15 @@ class TaskManager:
                 )
                 event_name = "task_failed"
 
-            self._save_store()
+            try:
+                self.store.update_task(task)
+                task.version += 1
+            except TaskConcurrencyError:
+                # Reload the authoritative state from DB to heal our cache
+                fresh_tasks = self.store.load()
+                if task.id in fresh_tasks:
+                    self._tasks[task.id] = fresh_tasks[task.id]
+                raise
 
         await self._emit_event(event_name, task, {"error": error})
         self._log_telemetry(event_name, task_id=task_id, error=error)
@@ -521,7 +740,15 @@ class TaskManager:
             )
             task.checkpoints.append(checkpoint)
             task.updated_at = datetime.now(UTC).isoformat()
-            self._save_store()
+            try:
+                self.store.update_task(task)
+                task.version += 1
+            except TaskConcurrencyError:
+                # Reload the authoritative state from DB to heal our cache
+                fresh_tasks = self.store.load()
+                if task.id in fresh_tasks:
+                    self._tasks[task.id] = fresh_tasks[task.id]
+                raise
 
         await self._emit_event("task_checkpoint_saved", task, {"checkpoint_id": cp_id})
         return checkpoint
@@ -597,8 +824,6 @@ class TaskManager:
             )
         )
 
-    def _save_store(self) -> None:
-        self.store.save(self._tasks)
 
     async def _emit_event(
         self, event_type: str, task: Task, payload: dict[str, Any] | None = None
