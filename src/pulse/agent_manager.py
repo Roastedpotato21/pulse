@@ -314,13 +314,14 @@ class AgentManager:
             
             async def agent_runner(t: Task, a: CollaborationAgent) -> None:
                 try:
-                    await self.task_manager.start_task(t.id)
-                    async for event in a.execute(t, self.shared_context, token):
-                        await queue.put(event)  # noqa: B023
-                    await self.task_manager.complete_task(t.id, "Agent execution finished")
+                    async def worker(leased_task: Task) -> str:
+                        async for event in a.execute(leased_task, self.shared_context, token):
+                            await queue.put(event)  # noqa: B023
+                        return "Agent execution finished"
+
+                    await self.task_manager.execute_task(t.id, worker)
                 # Intentionally broad to isolate execution boundaries and prevent crashes.
                 except Exception as e:  # noqa: BLE001
-                    await self.task_manager.fail_task(t.id, str(e))
                     await queue.put(e)  # noqa: B023
 
             runners = [asyncio.create_task(agent_runner(t, a)) for t, a in tasks_to_run]

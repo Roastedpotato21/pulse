@@ -1,7 +1,8 @@
 import json
 from pathlib import Path
-from pulse.task_manager import TaskStore, TaskManager
-import sqlite3
+
+from pulse.task_manager import TaskManager, TaskStore
+
 
 def test_legacy_json_migration(tmp_path: Path):
     """Verify legacy tasks.json is safely migrated to SQLite."""

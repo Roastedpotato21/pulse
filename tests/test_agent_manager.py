@@ -55,6 +55,13 @@ def mock_task_manager():
     tm.start_task = AsyncMock(side_effect=lambda tid: mock_update_status(tid, TaskStatus.RUNNING))
     tm.complete_task = AsyncMock(side_effect=lambda tid, res="": setattr(t1 if tid == "1" else t2, "status", TaskStatus.COMPLETED))
     tm.fail_task = AsyncMock(side_effect=lambda tid, err: setattr(t1 if tid == "1" else t2, "status", TaskStatus.FAILED))
+    async def mock_execute_task(tid, worker):
+        task = t1 if tid == "1" else t2
+        mock_update_status(tid, TaskStatus.RUNNING)
+        await worker(task)
+        task.status = TaskStatus.COMPLETED
+        return task
+    tm.execute_task = AsyncMock(side_effect=mock_execute_task)
     
     # We also need to mock create_task and queue_task in case they are used
     async def mock_create_task(**kwargs):
@@ -103,8 +110,7 @@ def test_agent_manager_parallel_execution(mock_task_manager):
     assert "[Coder] done" in event_contents
     
     # Task manager should have been updated
-    assert mock_task_manager.start_task.call_count == 2
-    assert mock_task_manager.complete_task.call_count == 2
+    assert mock_task_manager.execute_task.call_count == 2
 
 def test_agent_manager_run_response(mock_task_manager):
     # Setup agent that actually posts a message to shared_context

@@ -14,7 +14,7 @@ import sqlite3
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import asdict, dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -34,6 +34,33 @@ class TaskConcurrencyError(Exception):
         self.task_id = task_id
 
 
+class StaleWorkerError(Exception):
+    """Raised when a worker attempts to modify a task it no longer owns."""
+    def __init__(self, task_id: str):
+        super().__init__(f"Worker no longer owns task {task_id}.")
+        self.task_id = task_id
+
+
+class LeaseLostError(Exception):
+    """Raised when a heartbeat detects that task ownership has been lost.
+
+    This exception is used by the execution supervisor to cancel the
+    running worker_func when the lease can no longer be renewed.
+    It is distinct from StaleWorkerError (which guards individual mutations)
+    because it signals that the *entire execution* must terminate.
+
+    NOTE: asyncio.Task.cancel() delivers CancelledError at the next await
+    point.  It cannot terminate an already-issued HTTP request, LLM call,
+    or spawned shell process.  This mechanism stops the Pulse worker loop
+    from progressing after lease loss but does not provide universal
+    transactional rollback of external effects.  Remote execution
+    reconciliation remains GAP-07 scope.
+    """
+    def __init__(self, task_id: str):
+        super().__init__(f"Lease lost for task {task_id}. Execution must terminate.")
+        self.task_id = task_id
+
+
 class TaskStatus(Enum):
     """Current state of a managed task."""
 
@@ -44,6 +71,7 @@ class TaskStatus(Enum):
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
+    RECOVERY_PENDING = "RECOVERY_PENDING"
 
 
 class TaskPriority(Enum):
@@ -120,6 +148,9 @@ class Task:
     error: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     version: int = 1
+    owner_id: str | None = None
+    lease_expires_at: str | None = None
+    lease_epoch: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize Task object to JSON-compatible dictionary."""
@@ -141,6 +172,9 @@ class Task:
             "error": self.error,
             "metadata": self.metadata,
             "version": self.version,
+            "owner_id": self.owner_id,
+            "lease_expires_at": self.lease_expires_at,
+            "lease_epoch": self.lease_epoch,
         }
 
     @classmethod
@@ -174,6 +208,9 @@ class Task:
             error=data.get("error"),
             metadata=data.get("metadata", {}),
             version=int(data.get("version", 1)),
+            owner_id=data.get("owner_id"),
+            lease_expires_at=data.get("lease_expires_at"),
+            lease_epoch=int(data.get("lease_epoch", 0)),
         )
 
 
@@ -220,7 +257,10 @@ class TaskStore:
                     metadata TEXT NOT NULL,
                     checkpoints TEXT NOT NULL,
                     history TEXT NOT NULL,
-                    version INTEGER NOT NULL DEFAULT 1
+                    version INTEGER NOT NULL DEFAULT 1,
+                    owner_id TEXT,
+                    lease_expires_at TEXT,
+                    lease_epoch INTEGER NOT NULL DEFAULT 0
                 );
                 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
                 """
@@ -230,6 +270,12 @@ class TaskStore:
             columns = [row[1] for row in cursor.fetchall()]
             if "version" not in columns:
                 conn.execute("ALTER TABLE tasks ADD COLUMN version INTEGER NOT NULL DEFAULT 1")
+            if "owner_id" not in columns:
+                conn.execute("ALTER TABLE tasks ADD COLUMN owner_id TEXT")
+            if "lease_expires_at" not in columns:
+                conn.execute("ALTER TABLE tasks ADD COLUMN lease_expires_at TEXT")
+            if "lease_epoch" not in columns:
+                conn.execute("ALTER TABLE tasks ADD COLUMN lease_epoch INTEGER NOT NULL DEFAULT 0")
             
 
     def _migrate_legacy_json(self) -> None:
@@ -275,8 +321,8 @@ class TaskStore:
                     INSERT INTO tasks (
                         id, title, goal, priority, status, progress, retries, 
                         max_retries, depends_on, created_at, updated_at, 
-                        result, error, metadata, checkpoints, history, version
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        result, error, metadata, checkpoints, history, version, owner_id, lease_expires_at, lease_epoch
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task.id, task.title, task.goal, task.priority.name,
@@ -287,35 +333,61 @@ class TaskStore:
                         json.dumps([asdict(cp) for cp in task.checkpoints]),
                         json.dumps([asdict(rec) for rec in task.history]),
                         task.version,
+                        task.owner_id,
+                        task.lease_expires_at,
+                        task.lease_epoch,
                     )
                 )
         except sqlite3.Error as err:
             logger.error(f"Failed to create task {task.id}: {err}")
             raise
 
-    def update_task(self, task: Task) -> None:
+    def update_task(
+        self,
+        task: Task,
+        *,
+        expected_status: TaskStatus | None = None,
+        expected_owner_id: str | None = None,
+        expected_lease_epoch: int | None = None,
+        require_unexpired_lease: bool = False,
+    ) -> None:
         """Update an existing task safely using OCC."""
         try:
             with self._connect() as conn:
+                where = "WHERE id = ? AND version = ?"
+                params: list[Any] = [
+                    task.title, task.goal, task.priority.name,
+                    task.status.value, task.progress, task.retries,
+                    task.max_retries, json.dumps(task.depends_on),
+                    task.created_at, task.updated_at, task.result,
+                    task.error, json.dumps(task.metadata),
+                    json.dumps([asdict(cp) for cp in task.checkpoints]),
+                    json.dumps([asdict(rec) for rec in task.history]),
+                    task.owner_id, task.lease_expires_at, task.lease_epoch,
+                    task.id, task.version,
+                ]
+                if expected_status is not None:
+                    where += " AND status = ?"
+                    params.append(expected_status.value)
+                if expected_owner_id is not None:
+                    where += " AND owner_id = ?"
+                    params.append(expected_owner_id)
+                if expected_lease_epoch is not None:
+                    where += " AND lease_epoch = ?"
+                    params.append(expected_lease_epoch)
+                if require_unexpired_lease:
+                    where += " AND lease_expires_at > ?"
+                    params.append(datetime.now(UTC).isoformat())
                 cursor = conn.execute(
                     """
                     UPDATE tasks SET
                         title=?, goal=?, priority=?, status=?, progress=?,
                         retries=?, max_retries=?, depends_on=?, created_at=?,
                         updated_at=?, result=?, error=?, metadata=?,
-                        checkpoints=?, history=?, version=version + 1
-                    WHERE id = ? AND version = ?
-                    """,
-                    (
-                        task.title, task.goal, task.priority.name,
-                        task.status.value, task.progress, task.retries,
-                        task.max_retries, json.dumps(task.depends_on),
-                        task.created_at, task.updated_at, task.result,
-                        task.error, json.dumps(task.metadata),
-                        json.dumps([asdict(cp) for cp in task.checkpoints]),
-                        json.dumps([asdict(rec) for rec in task.history]),
-                        task.id, task.version,
-                    )
+                        checkpoints=?, history=?, version=version + 1,
+                        owner_id=?, lease_expires_at=?, lease_epoch=?
+                    """ + where,
+                    params,
                 )
                 if cursor.rowcount == 0:
                     raise TaskConcurrencyError(task.id)
@@ -353,6 +425,9 @@ class TaskStore:
                         "checkpoints": json.loads(row_dict["checkpoints"]),
                         "history": json.loads(row_dict["history"]),
                         "version": row_dict["version"],
+                        "owner_id": row_dict.get("owner_id"),
+                        "lease_expires_at": row_dict.get("lease_expires_at"),
+                        "lease_epoch": row_dict.get("lease_epoch", 0),
                     }
                     tasks[row_dict["id"]] = Task.from_dict(data)
             return tasks
@@ -402,6 +477,7 @@ class TaskManager:
     persistence, checkpoints, telemetry logging, long-term memory updates,
     and VS Code event broadcasts.
     """
+    CANCELLATION_GRACE_SECONDS = 1.0
 
     def __init__(
         self,
@@ -411,8 +487,16 @@ class TaskManager:
         memory: Any | None = None,
         store: TaskStore | None = None,
         event_bus: TaskEventBus | None = None,
+        heartbeat_interval: float = 15.0,
+        lease_duration: float = 60.0,
     ) -> None:
+        if heartbeat_interval <= 0 or lease_duration <= 0 or heartbeat_interval >= lease_duration:
+            raise ValueError("Invalid heartbeat config: interval must be > 0 and strictly less than lease_duration.")
+
         self.workspace = workspace or Path.cwd()
+        self.worker_id = f"worker-{uuid.uuid4().hex[:8]}"
+        self.heartbeat_interval = heartbeat_interval
+        self.lease_duration = lease_duration
         self.telemetry = telemetry
         self.memory = memory
         self.store = store or TaskStore(self.workspace)
@@ -420,10 +504,90 @@ class TaskManager:
         self._tasks: dict[str, Task] = self.store.load()
         self._queue: list[str] = []
         self._lock = asyncio.Lock()
+        self._heartbeat_tasks: dict[str, asyncio.Task] = {}
+        # Tracks leases acquired by this manager.  It lets mutation methods
+        # distinguish an active worker from legacy/manual lifecycle calls that
+        # may transition a queued task directly.
+        self._lease_epochs: dict[str, int] = {}
+        self._uncontained_tasks: set[asyncio.Task] = set()
+        
+        # We don't automatically recover in __init__ because we want async startup.
+        # But for simplicity, we provide a `recover_startup_tasks` method to be called.
 
     # ---------------------------------------------------------------------------
     # Public Task Lifecycle Methods
     # ---------------------------------------------------------------------------
+
+    async def recover_tasks(self) -> None:
+        """Scan for orphaned RUNNING tasks and recover them if leases expired."""
+        tasks_to_recover = []
+        async with self._lock:
+            for task in self._tasks.values():
+                if task.status == TaskStatus.RUNNING:
+                    if not task.lease_expires_at:
+                        tasks_to_recover.append(task.id)
+                    else:
+                        try:
+                            expires_at = datetime.fromisoformat(task.lease_expires_at)
+                            if datetime.now(UTC) > expires_at:
+                                tasks_to_recover.append(task.id)
+                        except ValueError:
+                            tasks_to_recover.append(task.id)
+
+        for task_id in tasks_to_recover:
+            await self._recover_single_task(task_id)
+
+    async def _recover_single_task(self, task_id: str) -> None:
+        for attempt in range(3):
+            async with self._lock:
+                task = self._get_task_or_raise(task_id)
+                if task.status != TaskStatus.RUNNING:
+                    return
+                if task.lease_expires_at:
+                    try:
+                        if datetime.now(UTC) <= datetime.fromisoformat(task.lease_expires_at):
+                            return
+                    except ValueError:
+                        pass
+                
+                is_remote = task.metadata.get("execution_mode") == "remote"
+                
+                task.owner_id = None
+                task.lease_expires_at = None
+                # Recovery invalidates every capability held by the old executor.
+                task.lease_epoch += 1
+                
+                if is_remote:
+                    task.status = TaskStatus.RECOVERY_PENDING
+                    detail = "Remote execution could not be reconciled. Task moved to RECOVERY_PENDING."
+                else:
+                    task.status = TaskStatus.QUEUED
+                    if task_id not in self._queue:
+                        self._queue.append(task_id)
+                    self._sort_queue()
+                    task.retries += 1
+                    detail = "Recovered orphaned task from stale lease."
+
+                task.updated_at = datetime.now(UTC).isoformat()
+                task.history.append(
+                    TaskExecutionRecord(
+                        timestamp=datetime.now(UTC).isoformat(),
+                        action="recovery_initiated",
+                        detail=detail,
+                        success=not is_remote
+                    )
+                )
+
+                try:
+                    self.store.update_task(task)
+                    task.version += 1
+                    break
+                except TaskConcurrencyError:
+                    fresh_tasks = self.store.load()
+                    if task.id in fresh_tasks:
+                        self._tasks[task.id] = fresh_tasks[task.id]
+                    if attempt == 2:
+                        raise
 
     async def create_task(
         self,
@@ -459,55 +623,78 @@ class TaskManager:
 
     async def queue_task(self, task_id: str) -> Task:
         """Transition task to QUEUED and place it into priority queue."""
-        async with self._lock:
-            task = self._get_task_or_raise(task_id)
-            if task.status in (TaskStatus.RUNNING, TaskStatus.COMPLETED):
-                return task
+        for attempt in range(3):
+            async with self._lock:
+                task = self._get_task_or_raise(task_id)
+                if task.status in (TaskStatus.RUNNING, TaskStatus.COMPLETED):
+                    return task
 
-            task.status = TaskStatus.QUEUED
-            task.updated_at = datetime.now(UTC).isoformat()
-            if task_id not in self._queue:
-                self._queue.append(task_id)
-            self._sort_queue()
-            try:
-                self.store.update_task(task)
-                task.version += 1
-            except TaskConcurrencyError:
-                # Reload the authoritative state from DB to heal our cache
-                fresh_tasks = self.store.load()
-                if task.id in fresh_tasks:
-                    self._tasks[task.id] = fresh_tasks[task.id]
-                raise
+                task.status = TaskStatus.QUEUED
+                task.updated_at = datetime.now(UTC).isoformat()
+                if task_id not in self._queue:
+                    self._queue.append(task_id)
+                self._sort_queue()
+                try:
+                    self.store.update_task(task)
+                    task.version += 1
+                    break  # OCC success
+                except TaskConcurrencyError:
+                    # Reload the authoritative state from DB to heal our cache
+                    fresh_tasks = self.store.load()
+                    if task.id in fresh_tasks:
+                        self._tasks[task.id] = fresh_tasks[task.id]
+                    if attempt == 2:
+                        raise
 
         await self._emit_event("task_queued", task)
         return task
 
     async def start_task(self, task_id: str) -> Task:
         """Transition task to RUNNING status."""
-        async with self._lock:
-            task = self._get_task_or_raise(task_id)
+        for attempt in range(3):
+            async with self._lock:
+                task = self._get_task_or_raise(task_id)
 
-            # Check dependencies
-            unresolved = [
-                dep_id for dep_id in task.depends_on
-                if dep_id in self._tasks and self._tasks[dep_id].status != TaskStatus.COMPLETED
-            ]
-            if unresolved:
-                raise RuntimeError(f"Cannot start task {task_id}; unresolved dependencies: {unresolved}")
+                # Check dependencies
+                unresolved = [
+                    dep_id for dep_id in task.depends_on
+                    if dep_id in self._tasks and self._tasks[dep_id].status != TaskStatus.COMPLETED
+                ]
+                if unresolved:
+                    raise RuntimeError(f"Cannot start task {task_id}; unresolved dependencies: {unresolved}")
 
-            task.status = TaskStatus.RUNNING
-            task.updated_at = datetime.now(UTC).isoformat()
-            if task_id in self._queue:
-                self._queue.remove(task_id)
-            try:
-                self.store.update_task(task)
-                task.version += 1
-            except TaskConcurrencyError:
-                # Reload the authoritative state from DB to heal our cache
-                fresh_tasks = self.store.load()
-                if task.id in fresh_tasks:
-                    self._tasks[task.id] = fresh_tasks[task.id]
-                raise
+                # Guard acquisition
+                if task.status not in (TaskStatus.QUEUED, TaskStatus.PENDING):
+                    # We can also steal it if it's RUNNING but expired. 
+                    if task.status == TaskStatus.RUNNING and task.lease_expires_at:
+                        try:
+                            expires_at = datetime.fromisoformat(task.lease_expires_at)
+                            if datetime.now(UTC) <= expires_at:
+                                raise RuntimeError(f"Task {task_id} is currently owned and lease is active.")
+                        except ValueError:
+                            raise RuntimeError(f"Task {task_id} has invalid lease.")
+                    else:
+                        raise RuntimeError(f"Cannot start task {task_id}; wrong status {task.status.value}")
+
+                task.status = TaskStatus.RUNNING
+                task.owner_id = self.worker_id
+                task.lease_epoch += 1
+                task.lease_expires_at = (datetime.now(UTC) + timedelta(seconds=self.lease_duration)).isoformat()
+                task.updated_at = datetime.now(UTC).isoformat()
+                if task_id in self._queue:
+                    self._queue.remove(task_id)
+                try:
+                    self.store.update_task(task)
+                    task.version += 1
+                    self._lease_epochs[task_id] = task.lease_epoch
+                    break  # OCC success
+                except TaskConcurrencyError:
+                    # Reload the authoritative state from DB to heal our cache
+                    fresh_tasks = self.store.load()
+                    if task.id in fresh_tasks:
+                        self._tasks[task.id] = fresh_tasks[task.id]
+                    if attempt == 2:
+                        raise
 
         await self._emit_event("task_started", task)
         self._log_telemetry("task_started", task_id=task_id)
@@ -515,92 +702,110 @@ class TaskManager:
 
     async def update_progress(self, task_id: str, progress: float, detail: str = "") -> Task:
         """Update task progress percentage (0.0 - 100.0)."""
-        async with self._lock:
-            task = self._get_task_or_raise(task_id)
-            task.progress = min(max(progress, 0.0), 100.0)
-            task.updated_at = datetime.now(UTC).isoformat()
-            if detail:
-                task.history.append(
-                    TaskExecutionRecord(
-                        timestamp=datetime.now(UTC).isoformat(),
-                        action="progress_update",
-                        detail=detail,
+        for attempt in range(3):
+            async with self._lock:
+                task = self._check_ownership(self._get_task_or_raise(task_id))
+                fence = self._fence_for(task)
+                
+                task.progress = min(max(progress, 0.0), 100.0)
+                task.updated_at = datetime.now(UTC).isoformat()
+                if detail:
+                    task.history.append(
+                        TaskExecutionRecord(
+                            timestamp=datetime.now(UTC).isoformat(),
+                            action="progress_update",
+                            detail=detail,
+                        )
                     )
-                )
-            try:
-                self.store.update_task(task)
-                task.version += 1
-            except TaskConcurrencyError:
-                # Reload the authoritative state from DB to heal our cache
-                fresh_tasks = self.store.load()
-                if task.id in fresh_tasks:
-                    self._tasks[task.id] = fresh_tasks[task.id]
-                raise
+                try:
+                    self._update_task_with_fence(task, fence)
+                    task.version += 1
+                    break  # OCC success
+                except TaskConcurrencyError:
+                    # Reload the authoritative state from DB to heal our cache
+                    fresh_tasks = self.store.load()
+                    if task.id in fresh_tasks:
+                        self._tasks[task.id] = fresh_tasks[task.id]
+                    if attempt == 2:
+                        raise
 
         await self._emit_event("task_progress", task, {"detail": detail})
         return task
 
     async def pause_task(self, task_id: str, reason: str = "") -> Task:
         """Pause a running or queued task."""
-        async with self._lock:
-            task = self._get_task_or_raise(task_id)
-            task.status = TaskStatus.PAUSED
-            task.updated_at = datetime.now(UTC).isoformat()
-            if task_id in self._queue:
-                self._queue.remove(task_id)
-            task.history.append(
-                TaskExecutionRecord(
-                    timestamp=datetime.now(UTC).isoformat(),
-                    action="paused",
-                    detail=reason or "Task paused by user",
+        for attempt in range(3):
+            async with self._lock:
+                task = self._check_ownership(self._get_task_or_raise(task_id))
+                fence = self._fence_for(task)
+                
+                task.status = TaskStatus.PAUSED
+                task.owner_id = None
+                task.lease_expires_at = None
+                self._stop_heartbeat(task_id)
+                task.updated_at = datetime.now(UTC).isoformat()
+                if task_id in self._queue:
+                    self._queue.remove(task_id)
+                task.history.append(
+                    TaskExecutionRecord(
+                        timestamp=datetime.now(UTC).isoformat(),
+                        action="paused",
+                        detail=reason or "Task paused by user",
+                    )
                 )
-            )
-            try:
-                self.store.update_task(task)
-                task.version += 1
-            except TaskConcurrencyError:
-                # Reload the authoritative state from DB to heal our cache
-                fresh_tasks = self.store.load()
-                if task.id in fresh_tasks:
-                    self._tasks[task.id] = fresh_tasks[task.id]
-                raise
+                try:
+                    self._update_task_with_fence(task, fence)
+                    task.version += 1
+                    break  # OCC success
+                except TaskConcurrencyError:
+                    # Reload the authoritative state from DB to heal our cache
+                    fresh_tasks = self.store.load()
+                    if task.id in fresh_tasks:
+                        self._tasks[task.id] = fresh_tasks[task.id]
+                    if attempt == 2:
+                        raise
 
+        self._lease_epochs.pop(task_id, None)
         await self._emit_event("task_paused", task, {"reason": reason})
         self._log_telemetry("task_paused", task_id=task_id, reason=reason)
         return task
 
     async def resume_task(self, task_id: str) -> Task:
         """Resume a paused or failed task from its latest checkpoint."""
-        async with self._lock:
-            task = self._get_task_or_raise(task_id)
-            if task.status not in (TaskStatus.PAUSED, TaskStatus.FAILED):
-                raise ValueError(f"Task {task_id} is in state {task.status.value} and cannot be resumed.")
+        for attempt in range(3):
+            async with self._lock:
+                task = self._get_task_or_raise(task_id)
+                if task.status not in (TaskStatus.PAUSED, TaskStatus.FAILED):
+                    raise ValueError(f"Task {task_id} is in state {task.status.value} and cannot be resumed.")
 
-            task.status = TaskStatus.QUEUED
-            task.updated_at = datetime.now(UTC).isoformat()
-            if task_id not in self._queue:
-                self._queue.append(task_id)
-            self._sort_queue()
+                task.status = TaskStatus.QUEUED
+                task.updated_at = datetime.now(UTC).isoformat()
+                if task_id not in self._queue:
+                    self._queue.append(task_id)
+                self._sort_queue()
 
-            latest_cp = task.checkpoints[-1] if task.checkpoints else None
-            detail = f"Resumed from checkpoint {latest_cp.checkpoint_id}" if latest_cp else "Resumed execution"
+                latest_cp = task.checkpoints[-1] if task.checkpoints else None
+                detail = f"Resumed from checkpoint {latest_cp.checkpoint_id}" if latest_cp else "Resumed execution"
 
-            task.history.append(
-                TaskExecutionRecord(
-                    timestamp=datetime.now(UTC).isoformat(),
-                    action="resumed",
-                    detail=detail,
+                task.history.append(
+                    TaskExecutionRecord(
+                        timestamp=datetime.now(UTC).isoformat(),
+                        action="resumed",
+                        detail=detail,
+                    )
                 )
-            )
-            try:
-                self.store.update_task(task)
-                task.version += 1
-            except TaskConcurrencyError:
-                # Reload the authoritative state from DB to heal our cache
-                fresh_tasks = self.store.load()
-                if task.id in fresh_tasks:
-                    self._tasks[task.id] = fresh_tasks[task.id]
-                raise
+                try:
+                    self.store.update_task(task)
+                    task.version += 1
+                    self._lease_epochs.pop(task_id, None)
+                    break  # OCC success
+                except TaskConcurrencyError:
+                    # Reload the authoritative state from DB to heal our cache
+                    fresh_tasks = self.store.load()
+                    if task.id in fresh_tasks:
+                        self._tasks[task.id] = fresh_tasks[task.id]
+                    if attempt == 2:
+                        raise
 
         await self._emit_event("task_resumed", task)
         self._log_telemetry("task_resumed", task_id=task_id)
@@ -608,28 +813,37 @@ class TaskManager:
 
     async def cancel_task(self, task_id: str, reason: str = "") -> Task:
         """Cancel a pending, queued, or running task."""
-        async with self._lock:
-            task = self._get_task_or_raise(task_id)
-            task.status = TaskStatus.CANCELLED
-            task.updated_at = datetime.now(UTC).isoformat()
-            if task_id in self._queue:
-                self._queue.remove(task_id)
-            task.history.append(
-                TaskExecutionRecord(
-                    timestamp=datetime.now(UTC).isoformat(),
-                    action="cancelled",
-                    detail=reason or "Task cancelled by user",
+        for attempt in range(3):
+            async with self._lock:
+                task = self._check_ownership(self._get_task_or_raise(task_id))
+                fence = self._fence_for(task)
+                
+                task.status = TaskStatus.CANCELLED
+                task.owner_id = None
+                task.lease_expires_at = None
+                self._stop_heartbeat(task_id)
+                task.updated_at = datetime.now(UTC).isoformat()
+                if task_id in self._queue:
+                    self._queue.remove(task_id)
+                task.history.append(
+                    TaskExecutionRecord(
+                        timestamp=datetime.now(UTC).isoformat(),
+                        action="cancelled",
+                        detail=reason or "Task cancelled by user",
+                    )
                 )
-            )
-            try:
-                self.store.update_task(task)
-                task.version += 1
-            except TaskConcurrencyError:
-                # Reload the authoritative state from DB to heal our cache
-                fresh_tasks = self.store.load()
-                if task.id in fresh_tasks:
-                    self._tasks[task.id] = fresh_tasks[task.id]
-                raise
+                try:
+                    self._update_task_with_fence(task, fence)
+                    task.version += 1
+                    self._lease_epochs.pop(task_id, None)
+                    break  # OCC success
+                except TaskConcurrencyError:
+                    # Reload the authoritative state from DB to heal our cache
+                    fresh_tasks = self.store.load()
+                    if task.id in fresh_tasks:
+                        self._tasks[task.id] = fresh_tasks[task.id]
+                    if attempt == 2:
+                        raise
 
         await self._emit_event("task_cancelled", task, {"reason": reason})
         self._log_telemetry("task_cancelled", task_id=task_id, reason=reason)
@@ -637,37 +851,46 @@ class TaskManager:
 
     async def complete_task(self, task_id: str, result: str = "") -> Task:
         """Mark task as successfully COMPLETED."""
-        async with self._lock:
-            task = self._get_task_or_raise(task_id)
-            task.status = TaskStatus.COMPLETED
-            task.progress = 100.0
-            task.result = result
-            task.updated_at = datetime.now(UTC).isoformat()
-            task.history.append(
-                TaskExecutionRecord(
-                    timestamp=datetime.now(UTC).isoformat(),
-                    action="completed",
-                    detail=f"Task completed: {result[:60]}",
+        for attempt in range(3):
+            async with self._lock:
+                task = self._check_ownership(self._get_task_or_raise(task_id))
+                fence = self._fence_for(task)
+                
+                task.status = TaskStatus.COMPLETED
+                task.owner_id = None
+                task.lease_expires_at = None
+                self._stop_heartbeat(task_id)
+                task.progress = 100.0
+                task.result = result
+                task.updated_at = datetime.now(UTC).isoformat()
+                task.history.append(
+                    TaskExecutionRecord(
+                        timestamp=datetime.now(UTC).isoformat(),
+                        action="completed",
+                        detail=f"Task completed: {result[:60]}",
+                    )
                 )
-            )
-            try:
-                self.store.update_task(task)
-                task.version += 1
-            except TaskConcurrencyError:
-                # Reload the authoritative state from DB to heal our cache
-                fresh_tasks = self.store.load()
-                if task.id in fresh_tasks:
-                    self._tasks[task.id] = fresh_tasks[task.id]
-                raise
+                try:
+                    self._update_task_with_fence(task, fence)
+                    task.version += 1
+                    self._lease_epochs.pop(task_id, None)
+                    break  # OCC success
+                except TaskConcurrencyError:
+                    # Reload the authoritative state from DB to heal our cache
+                    fresh_tasks = self.store.load()
+                    if task.id in fresh_tasks:
+                        self._tasks[task.id] = fresh_tasks[task.id]
+                    if attempt == 2:
+                        raise
 
-        # Update long-term memory if available
-        if self.memory and hasattr(self.memory, "save_context"):
-            try:
-                await self.memory.save_context(f"Completed task '{task.title}': {result[:200]}")
-            # Intentionally broad to isolate execution boundaries and prevent crashes.
-            except Exception as err:  # noqa: BLE001
-                # Intentionally broad to prevent memory update failures from crashing the task loop.
-                logger.warning(f"Memory update failed: {err}")
+            # Update long-term memory if available
+            if self.memory and hasattr(self.memory, "save_context"):
+                try:
+                    await self.memory.save_context(f"Completed task '{task.title}': {result[:200]}")
+                # Intentionally broad to isolate execution boundaries and prevent crashes.
+                except Exception as err:  # noqa: BLE001
+                    # Intentionally broad to prevent memory update failures from crashing the task loop.
+                    logger.warning(f"Memory update failed: {err}")
 
         await self._emit_event("task_completed", task, {"result": result})
         self._log_telemetry("task_completed", task_id=task_id)
@@ -675,48 +898,58 @@ class TaskManager:
 
     async def fail_task(self, task_id: str, error: str) -> Task:
         """Mark task as FAILED or trigger retry if max_retries not reached."""
-        async with self._lock:
-            task = self._get_task_or_raise(task_id)
-            task.retries += 1
-            task.updated_at = datetime.now(UTC).isoformat()
-            task.error = error
+        for attempt in range(3):
+            async with self._lock:
+                task = self._check_ownership(self._get_task_or_raise(task_id))
+                fence = self._fence_for(task)
+                
+                task.owner_id = None
+                task.lease_expires_at = None
+                self._stop_heartbeat(task_id)
+                
+                task.retries += 1
+                task.updated_at = datetime.now(UTC).isoformat()
+                task.error = error
 
-            if task.retries <= task.max_retries:
-                task.status = TaskStatus.QUEUED
-                if task_id not in self._queue:
-                    self._queue.append(task_id)
-                self._sort_queue()
-                task.history.append(
-                    TaskExecutionRecord(
-                        timestamp=datetime.now(UTC).isoformat(),
-                        action="retry_scheduled",
-                        detail=f"Retry {task.retries}/{task.max_retries} after error: {error[:60]}",
-                        success=False,
+                if task.retries <= task.max_retries:
+                    task.status = TaskStatus.QUEUED
+                    if task_id not in self._queue:
+                        self._queue.append(task_id)
+                    self._sort_queue()
+                    task.history.append(
+                        TaskExecutionRecord(
+                            timestamp=datetime.now(UTC).isoformat(),
+                            action="retry_scheduled",
+                            detail=f"Retry {task.retries}/{task.max_retries} after error: {error[:60]}",
+                            success=False,
+                        )
                     )
-                )
-                event_name = "task_retry_scheduled"
-            else:
-                task.status = TaskStatus.FAILED
-                task.history.append(
-                    TaskExecutionRecord(
-                        timestamp=datetime.now(UTC).isoformat(),
-                        action="failed",
-                        detail=f"Task failed permanently: {error[:60]}",
-                        success=False,
+                    event_name = "task_retry_scheduled"
+                else:
+                    task.status = TaskStatus.FAILED
+                    task.history.append(
+                        TaskExecutionRecord(
+                            timestamp=datetime.now(UTC).isoformat(),
+                            action="failed",
+                            detail=f"Task failed permanently: {error[:60]}",
+                            success=False,
+                        )
                     )
-                )
-                event_name = "task_failed"
+                    event_name = "task_failed"
 
-            try:
-                self.store.update_task(task)
-                task.version += 1
-            except TaskConcurrencyError:
-                # Reload the authoritative state from DB to heal our cache
-                fresh_tasks = self.store.load()
-                if task.id in fresh_tasks:
-                    self._tasks[task.id] = fresh_tasks[task.id]
-                raise
+                try:
+                    self._update_task_with_fence(task, fence)
+                    task.version += 1
+                    break  # OCC success
+                except TaskConcurrencyError:
+                    # Reload the authoritative state from DB to heal our cache
+                    fresh_tasks = self.store.load()
+                    if task.id in fresh_tasks:
+                        self._tasks[task.id] = fresh_tasks[task.id]
+                    if attempt == 2:
+                        raise
 
+        self._lease_epochs.pop(task_id, None)
         await self._emit_event(event_name, task, {"error": error})
         self._log_telemetry(event_name, task_id=task_id, error=error)
         return task
@@ -729,45 +962,50 @@ class TaskManager:
         self, task_id: str, step_index: int, state_data: dict[str, Any]
     ) -> TaskCheckpoint:
         """Create and append a state checkpoint for a task."""
-        async with self._lock:
-            task = self._get_task_or_raise(task_id)
-            cp_id = f"cp-{task_id}-{step_index}-{uuid.uuid4().hex[:4]}"
-            checkpoint = TaskCheckpoint(
-                checkpoint_id=cp_id,
-                task_id=task_id,
-                step_index=step_index,
-                state_data=state_data,
-            )
-            task.checkpoints.append(checkpoint)
-            task.updated_at = datetime.now(UTC).isoformat()
-            try:
-                self.store.update_task(task)
-                task.version += 1
-            except TaskConcurrencyError:
-                # Reload the authoritative state from DB to heal our cache
-                fresh_tasks = self.store.load()
-                if task.id in fresh_tasks:
-                    self._tasks[task.id] = fresh_tasks[task.id]
-                raise
+        for attempt in range(3):
+            async with self._lock:
+                task = self._check_ownership(self._get_task_or_raise(task_id))
+                fence = self._fence_for(task)
+                
+                cp_id = f"cp-{task_id}-{step_index}-{uuid.uuid4().hex[:4]}"
+                checkpoint = TaskCheckpoint(
+                    checkpoint_id=cp_id,
+                    task_id=task_id,
+                    step_index=step_index,
+                    state_data=state_data,
+                )
+                task.checkpoints.append(checkpoint)
+                task.updated_at = datetime.now(UTC).isoformat()
+                try:
+                    self._update_task_with_fence(task, fence)
+                    task.version += 1
+                    break  # OCC success
+                except TaskConcurrencyError:
+                    # Reload the authoritative state from DB to heal our cache
+                    fresh_tasks = self.store.load()
+                    if task.id in fresh_tasks:
+                        self._tasks[task.id] = fresh_tasks[task.id]
+                    if attempt == 2:
+                        raise
 
         await self._emit_event("task_checkpoint_saved", task, {"checkpoint_id": cp_id})
         return checkpoint
 
     async def restore_checkpoint(self, task_id: str, checkpoint_id: str | None = None) -> TaskCheckpoint:
         """Retrieve a checkpoint for restoration."""
-        async with self._lock:
-            task = self._get_task_or_raise(task_id)
-            if not task.checkpoints:
-                raise ValueError(f"Task {task_id} has no checkpoints.")
+        for attempt in range(3):
+            async with self._lock:
+                task = self._get_task_or_raise(task_id)
+                if not task.checkpoints:
+                    raise ValueError(f"Task {task_id} has no checkpoints.")
 
-            if checkpoint_id:
-                cp = next((c for c in task.checkpoints if c.checkpoint_id == checkpoint_id), None)
-                if not cp:
-                    raise ValueError(f"Checkpoint {checkpoint_id} not found for task {task_id}.")
-                return cp
+                if checkpoint_id:
+                    cp = next((c for c in task.checkpoints if c.checkpoint_id == checkpoint_id), None)
+                    if not cp:
+                        raise ValueError(f"Checkpoint {checkpoint_id} not found for task {task_id}.")
+                    return cp
 
-            return task.checkpoints[-1]  # latest checkpoint
-
+                return task.checkpoints[-1]  # latest checkpoint
     # ---------------------------------------------------------------------------
     # Query & Worker Queue Methods
     # ---------------------------------------------------------------------------
@@ -775,7 +1013,6 @@ class TaskManager:
     def get_task(self, task_id: str) -> Task | None:
         """Retrieve task by ID."""
         return self._tasks.get(task_id)
-
     def list_tasks(self, *, status: TaskStatus | None = None) -> list[Task]:
         """List all tasks, optionally filtered by status, sorted by priority and created_at."""
         tasks = list(self._tasks.values())
@@ -786,29 +1023,294 @@ class TaskManager:
     async def process_queue(
         self, worker_func: Callable[[Task], Awaitable[str]]
     ) -> list[Task]:
-        """Processes queued tasks concurrently using priority order."""
+        """Processes queued tasks with lease-bound execution supervision.
+
+        Each worker_func invocation is wrapped in an asyncio.Task that is
+        raced against the heartbeat task via asyncio.wait(FIRST_COMPLETED).
+        If the heartbeat detects ownership loss (StaleWorkerError), it
+        raises LeaseLostError, which causes the supervisor to immediately
+        cancel worker_func.  This prevents the duplicate-execution
+        vulnerability where a stale worker continues running after its
+        lease has been recovered by another process.
+        """
         processed: list[Task] = []
 
         async with self._lock:
             ready_ids = list(self._queue)
 
+        processed: list[Task] = []
+        for task_id in ready_ids:
+            result = await self.execute_task(task_id, worker_func)
+            if result is not None:
+                processed.append(result)
+        return processed
+
         for task_id in ready_ids:
             try:
                 task = await self.start_task(task_id)
-                result_str = await worker_func(task)
+            # Intentionally broad to isolate start failures.
+            except Exception as err:  # noqa: BLE001
+                logger.warning(f"Failed to start task {task_id}: {err}")
+                try:
+                    failed = await self.fail_task(task_id, str(err))
+                    processed.append(failed)
+                except (StaleWorkerError, LeaseLostError):
+                    pass
+                continue
+
+            # Create supervised execution: worker + heartbeat run concurrently.
+            # The heartbeat was already started by start_task().
+            worker_task = asyncio.create_task(worker_func(task))
+            heartbeat_task = self._heartbeat_tasks.get(task_id)
+
+            try:
+                result_str = await self._supervise_execution(
+                    task_id, worker_task, heartbeat_task
+                )
                 completed = await self.complete_task(task_id, result_str)
                 processed.append(completed)
+            except LeaseLostError:
+                # Ownership lost — cancel worker, do NOT complete/fail.
+                # The recovered/new owner will handle this task.
+                logger.warning(
+                    f"Lease lost for task {task_id}; worker cancelled. "
+                    f"Recovery by new owner expected."
+                )
+            except asyncio.CancelledError:
+                # process_queue itself was cancelled — clean up both tasks.
+                raise
+            except StaleWorkerError:
+                # complete_task raised StaleWorkerError — ownership lost
+                # between worker completion and finalization.  Do nothing;
+                # the new owner will handle the task.
+                logger.warning(
+                    f"Stale worker for task {task_id} at completion; "
+                    f"discarding result."
+                )
             # Intentionally broad to isolate execution boundaries and prevent crashes.
             except Exception as err:  # noqa: BLE001
-                # Intentionally broad to isolate completion handlers and fallback to fail_task.
-                failed = await self.fail_task(task_id, str(err))
-                processed.append(failed)
+                # Worker raised an exception — normal failure path.
+                try:
+                    failed = await self.fail_task(task_id, str(err))
+                    processed.append(failed)
+                except (StaleWorkerError, LeaseLostError):
+                    logger.warning(
+                        f"Cannot fail task {task_id}: ownership lost."
+                    )
+            finally:
+                # Every execution path observes both children before moving on.
+                await self._cancel_and_await(worker_task)
+                await self._cancel_and_await(heartbeat_task)
+                if self._heartbeat_tasks.get(task_id) is heartbeat_task:
+                    del self._heartbeat_tasks[task_id]
 
         return processed
+
+    async def execute_task(
+        self, task_id: str, worker_func: Callable[[Task], Awaitable[str]]
+    ) -> Task | None:
+        """Run one local worker under the authoritative lease supervisor."""
+        try:
+            task = await self.start_task(task_id)
+        except Exception as err:  # noqa: BLE001
+            try:
+                return await self.fail_task(task_id, str(err))
+            except (StaleWorkerError, LeaseLostError):
+                logger.warning("Cannot record start failure for %s.", task_id)
+                return None
+        worker_task = asyncio.create_task(worker_func(task))
+        heartbeat_task = asyncio.create_task(self._heartbeat_loop(task_id))
+        self._heartbeat_tasks[task_id] = heartbeat_task
+        try:
+            result = await self._supervise_execution(task_id, worker_task, heartbeat_task)
+            return await self.complete_task(task_id, result)
+        except LeaseLostError:
+            logger.warning("Lease lost for task %s; execution fenced.", task_id)
+            return None
+        except asyncio.CancelledError:
+            raise
+        except StaleWorkerError:
+            logger.warning("Stale worker for task %s; discarding result.", task_id)
+            return None
+        except Exception as err:  # noqa: BLE001
+            try:
+                return await self.fail_task(task_id, str(err))
+            except StaleWorkerError:
+                logger.warning("Cannot fail task %s: ownership lost.", task_id)
+                return None
+        finally:
+            await self._cancel_and_await(worker_task)
+            await self._cancel_and_await(heartbeat_task)
+            if self._heartbeat_tasks.get(task_id) is heartbeat_task:
+                del self._heartbeat_tasks[task_id]
+
+    async def _supervise_execution(
+        self,
+        task_id: str,
+        worker_task: asyncio.Task,
+        heartbeat_task: asyncio.Task | None,
+    ) -> str:
+        """Supervise worker execution, cancelling it if the lease is lost.
+
+        Races worker_task against heartbeat_task using
+        asyncio.wait(FIRST_COMPLETED).
+
+        Returns:
+            The worker result string on success.
+
+        Raises:
+            LeaseLostError: if the heartbeat detects ownership loss.
+            Exception: re-raises the worker's exception if the worker fails.
+        """
+        if heartbeat_task is None:
+            raise LeaseLostError(task_id)
+
+        done, _pending = await asyncio.wait(
+            {worker_task, heartbeat_task}, return_when=asyncio.FIRST_COMPLETED
+        )
+        # A simultaneous completion is a lease-loss outcome: blindly choosing
+        # the worker would permit its result to win an ownership-loss race.
+        if heartbeat_task in done:
+            await self._cancel_and_await(worker_task)
+            if heartbeat_task.cancelled():
+                raise LeaseLostError(task_id)
+            exc = heartbeat_task.exception()
+            if exc is not None:
+                raise exc
+            raise LeaseLostError(task_id)
+
+        # The worker finished first, but the database remains authoritative.
+        # Check ownership before stopping the heartbeat and before completion.
+        self._verify_active_ownership(task_id)
+        await self._cancel_and_await(heartbeat_task)
+        return worker_task.result()
 
     # ---------------------------------------------------------------------------
     # Internal Helpers
     # ---------------------------------------------------------------------------
+
+    def _check_ownership(self, task: Task) -> Task:
+        """Return the authoritative record and enforce its durable lease fence."""
+        fresh = self.store.load().get(task.id)
+        if fresh is None:
+            raise StaleWorkerError(task.id)
+        self._tasks[task.id] = fresh
+        local_epoch = self._lease_epochs.get(task.id)
+        lease_valid = False
+        if fresh.lease_expires_at:
+            try:
+                lease_valid = datetime.now(UTC) < datetime.fromisoformat(fresh.lease_expires_at)
+            except ValueError:
+                lease_valid = False
+        if (fresh.status == TaskStatus.RUNNING or local_epoch is not None) and (
+            fresh.status != TaskStatus.RUNNING
+            or fresh.owner_id != self.worker_id
+            or local_epoch != fresh.lease_epoch
+            or not lease_valid
+        ):
+            raise StaleWorkerError(task.id)
+        return fresh
+
+    def _fence_for(self, task: Task) -> tuple[str, int] | None:
+        """Capture the durable execution capability before a mutation."""
+        if task.status != TaskStatus.RUNNING:
+            return None
+        return (self.worker_id, task.lease_epoch)
+
+    def _update_task_with_fence(
+        self, task: Task, fence: tuple[str, int] | None
+    ) -> None:
+        if fence is None:
+            self.store.update_task(task)
+            return
+        owner_id, epoch = fence
+        self.store.update_task(
+            task,
+            expected_status=TaskStatus.RUNNING,
+            expected_owner_id=owner_id,
+            expected_lease_epoch=epoch,
+            require_unexpired_lease=True,
+        )
+
+    def _verify_active_ownership(self, task_id: str) -> None:
+        """Load the authoritative record before finalizing worker output."""
+        task = self.store.load().get(task_id)
+        if (
+            task is None
+            or task.status != TaskStatus.RUNNING
+            or task.owner_id != self.worker_id
+        ):
+            raise LeaseLostError(task_id)
+        self._tasks[task_id] = task
+
+    async def _cancel_and_await(self, task: asyncio.Task | None) -> None:
+        """Cancel a child with a bounded wait; never treat timeout as stopped."""
+        if task is None or task.done():
+            return
+        task.cancel()
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(task), timeout=self.CANCELLATION_GRACE_SECONDS
+            )
+        except asyncio.CancelledError:
+            pass
+        except TimeoutError as err:
+            # Keep a strong reference so an uncontained task is visible rather
+            # than becoming an unobserved background task.  Its lease epoch is
+            # already fenced, so it cannot commit TaskManager mutations.
+            self._uncontained_tasks.add(task)
+            task.add_done_callback(self._uncontained_tasks.discard)
+            logger.critical("Worker ignored cancellation; lease remains fenced.")
+            raise LeaseLostError("uncontained-worker") from err
+
+    def _stop_heartbeat(self, task_id: str) -> None:
+        if task_id in self._heartbeat_tasks:
+            self._heartbeat_tasks[task_id].cancel()
+            del self._heartbeat_tasks[task_id]
+
+    async def _heartbeat_loop(self, task_id: str) -> None:
+        """Background heartbeat that renews the lease periodically.
+
+        If ownership is lost (StaleWorkerError from renew_lease), this
+        method raises LeaseLostError so that the execution supervisor
+        (_supervise_execution) can observe it and cancel the worker.
+
+        CancelledError is swallowed — it indicates normal shutdown by
+        a terminal transition (complete_task, fail_task, etc.).
+        """
+        try:
+            while True:
+                await asyncio.sleep(self.heartbeat_interval)
+                await self.renew_lease(task_id)
+        except asyncio.CancelledError:
+            pass  # Normal cancellation by completion/failure/pause
+        except StaleWorkerError:
+            # Ownership conclusively lost — signal supervisor.
+            raise LeaseLostError(task_id)
+        except Exception as e:  # noqa: BLE001
+            # Any other failure (DB error, etc.) — treat as lease lost
+            # because we can no longer guarantee ownership.
+            logger.warning(f"Heartbeat loop for {task_id} failed: {e}")
+            raise LeaseLostError(task_id)
+
+    async def renew_lease(self, task_id: str) -> None:
+        for attempt in range(3):
+            async with self._lock:
+                task = self._check_ownership(self._get_task_or_raise(task_id))
+                fence = self._fence_for(task)
+
+                task.lease_expires_at = (datetime.now(UTC) + timedelta(seconds=self.lease_duration)).isoformat()
+                
+                try:
+                    self._update_task_with_fence(task, fence)
+                    task.version += 1
+                    break
+                except TaskConcurrencyError:
+                    fresh_tasks = self.store.load()
+                    if task.id in fresh_tasks:
+                        self._tasks[task.id] = fresh_tasks[task.id]
+                    if attempt == 2:
+                        raise
 
     def _get_task_or_raise(self, task_id: str) -> Task:
         if task_id not in self._tasks:
