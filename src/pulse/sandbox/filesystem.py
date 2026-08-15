@@ -29,7 +29,10 @@ Concurrency guarantees:
 from __future__ import annotations
 
 import hashlib
+import json
+import os
 import shutil
+import tempfile
 import uuid
 from dataclasses import dataclass, field
 from difflib import unified_diff
@@ -38,6 +41,7 @@ from pathlib import Path
 from pulse.mutations import MutationTracker
 from pulse.sandbox.errors import (
     SandboxConcurrentModificationError,
+    SandboxRecoveryError,
     SandboxResourceError,
 )
 from pulse.sandbox.path_validator import PathValidator
@@ -179,6 +183,23 @@ class CoWFilesystem:
         if self._staging_base.exists():
             for child in self._staging_base.iterdir():
                 if child.is_dir():
+                    # Check for interrupted commit
+                    marker_path = child / "commit.ready"
+                    wal_path = child / "commit.wal"
+                    
+                    if marker_path.exists() and wal_path.exists():
+                        try:
+                            wal_data = json.loads(wal_path.read_text(encoding="utf-8"))
+                            self._apply_wal(wal_data, child)
+                        except SandboxRecoveryError as e:
+                            # P0/P1 Fail Closed: Log error, skip deleting this staging dir for forensic investigation.
+                            import logging
+                            logging.getLogger(__name__).error(f"WAL Recovery Failed for {child.name}: {e}")
+                            continue
+                        except (OSError, ValueError):
+                            # Corrupt JSON or unreadable WAL, swallow and delete.
+                            pass
+                            
                     shutil.rmtree(child, ignore_errors=True)
 
     def _check_staging_size(self, additional_bytes: int = 0) -> None:
@@ -294,42 +315,158 @@ class CoWFilesystem:
 
         Concurrency protocol:
             1. **Validate** every snapshotted file against current disk state.
-            2. **Write** each file immediately after its own validation.
-            3. On conflict → raise ``SandboxConcurrentModificationError``.
-               The transaction is NOT destroyed so the caller can inspect or retry.
+            2. **Prepare** a write-ahead log (WAL) and fsync it to disk.
+            3. **Execute** the mutations.
+            4. On conflict → raise ``SandboxConcurrentModificationError``.
 
-        The validate-then-write per-file approach minimises the TOCTOU window
-        compared to a bulk-validate-then-bulk-write design.
+        The two-phase commit with WAL ensures that a crash during the execute phase
+        is deterministically rolled forward on next startup.
         """
         if tx.is_committed or tx.is_discarded:
             raise ValueError(f"Transaction {tx.transaction_id} is no longer active.")
 
         modified_files: list[str] = []
 
+        # --- 1. Per-file validation ---
+        for clean_rel, content in tx.staged_changes.items():
+            real_path = self.workspace_root / clean_rel
+            original_snap = tx._file_snapshots.get(clean_rel)
+            _validate_snapshot(real_path, original_snap, clean_rel)
+
+        # --- 2. Write WAL (Phase 1) ---
+        wal_path = tx.staging_dir / "commit.wal"
+        wal_data = {
+            "transaction_id": tx.transaction_id,
+            "operations": []
+        }
+        for clean_rel, content in tx.staged_changes.items():
+            action = "delete" if content is None else "write"
+            
+            # Embed original snapshot metadata into WAL for P1 concurrency protection during recovery
+            snap = tx._file_snapshots.get(clean_rel)
+            snap_dict = None
+            if snap is not None:
+                snap_dict = {
+                    "inode": snap.inode,
+                    "device": snap.device,
+                    "size": snap.size,
+                    "mtime_ns": snap.mtime_ns,
+                    "content_hash": snap.content_hash,
+                }
+            
+            wal_data["operations"].append({"action": action, "path": clean_rel, "original_snap": snap_dict})
+        
+        with open(wal_path, "w", encoding="utf-8") as f:
+            f.write(json.dumps(wal_data))
+            f.flush()
+            os.fsync(f.fileno())
+            
+        marker_path = tx.staging_dir / "commit.ready"
+        with open(marker_path, "w", encoding="utf-8") as f:
+            f.flush()
+            os.fsync(f.fileno())
+            
+        try:
+            dir_fd = os.open(str(tx.staging_dir), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except (OSError, AttributeError):
+            pass  # Ignore on Windows or unsupported platforms
+
+        # --- 3. Execute Mutations (Phase 2) ---
         with self.mutations.transaction(command=command_name):
-            for clean_rel, content in tx.staged_changes.items():
-                real_path = self.workspace_root / clean_rel
+            self._apply_wal(wal_data, tx.staging_dir)
+            modified_files.extend(tx.staged_changes.keys())
 
-                # --- Per-file validation (minimise TOCTOU window) ---
-                original_snap = tx._file_snapshots.get(clean_rel)
-                _validate_snapshot(real_path, original_snap, clean_rel)
-
-                # --- Mutation ---
-                if content is None:
-                    # Execute staged deletion
-                    if real_path.exists():
-                        real_path.unlink()
-                else:
-                    # Execute staged write
-                    real_path.parent.mkdir(parents=True, exist_ok=True)
-                    real_path.write_text(content, encoding="utf-8")
-
-                modified_files.append(clean_rel)
-
+        # --- 4. Cleanup ---
         tx.is_committed = True
         self._active_transactions.pop(tx.transaction_id, None)
-        self.discard_transaction(tx)  # Clean up staging directory
+        self.discard_transaction(tx)
         return modified_files
+
+    def _apply_wal(self, wal_data: dict, staging_dir: Path) -> None:
+        """Deterministically apply all operations in the WAL."""
+        for op in wal_data["operations"]:
+            raw_path = op["path"]
+            action = op["action"]
+            
+            # P0: Secure WAL Replay against Path Traversal
+            try:
+                # Reuse existing PathValidator to ensure path is inside workspace
+                clean_rel = self.validator.assert_inside_workspace(raw_path).relative_to(self.workspace_root).as_posix()
+            except Exception as e:
+                raise SandboxRecoveryError(f"Malicious or invalid path in WAL: {e}", path=raw_path) from e
+                
+            real_path = self.workspace_root / clean_rel
+            
+            # P1: Concurrency Protection & Idempotency during Recovery
+            snap_dict = op.get("original_snap")
+            original_snap = None
+            if snap_dict:
+                original_snap = _FileSnapshot(
+                    inode=snap_dict["inode"],
+                    device=snap_dict["device"],
+                    size=snap_dict["size"],
+                    mtime_ns=snap_dict["mtime_ns"],
+                    content_hash=snap_dict["content_hash"],
+                )
+            
+            # Check if operation was already applied (Idempotency) or if the file changed externally
+            target_snap = _snapshot_file(real_path)
+            already_applied = False
+            
+            if action == "delete":
+                if target_snap is None:
+                    already_applied = True
+            elif action == "write":
+                staged_path = staging_dir / clean_rel
+                # If target is identical to staged file, it's already applied
+                if target_snap is not None and staged_path.exists():
+                    staged_snap = _snapshot_file(staged_path)
+                    if staged_snap and target_snap.content_hash == staged_snap.content_hash:
+                        already_applied = True
+            
+            if not already_applied:
+                try:
+                    # Validate that the file is exactly as it was when the transaction was staged
+                    _validate_snapshot(real_path, original_snap, clean_rel)
+                except SandboxConcurrentModificationError as e:
+                    raise SandboxRecoveryError(
+                        f"Concurrency conflict during recovery. Target was modified externally: {e}", 
+                        path=raw_path, reason=e.reason
+                    ) from e
+            else:
+                continue # Skip applying if it's already done
+            
+            if action == "delete":
+                try:
+                    real_path.unlink()
+                except FileNotFoundError:
+                    pass
+            elif action == "write":
+                staged_path = staging_dir / clean_rel
+                real_path.parent.mkdir(parents=True, exist_ok=True)
+                
+                # Atomic write using temp file + os.replace
+                fd, tmp_path = tempfile.mkstemp(dir=real_path.parent, prefix=".cow_tmp_")
+                try:
+                    content = staged_path.read_bytes()
+                    os.write(fd, content)
+                    os.fsync(fd)
+                    os.close(fd)
+                    os.replace(tmp_path, str(real_path))
+                except Exception:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+                    try:
+                        os.unlink(tmp_path)
+                    except OSError:
+                        pass
+                    raise
 
     def discard_transaction(self, tx: CoWTransaction) -> None:
         """Discard staged changes and delete temporary staging directory."""

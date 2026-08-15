@@ -90,3 +90,17 @@ class SandboxConcurrentModificationError(RuntimeError):
         self.path = path
         self.reason = reason
         super().__init__(message)
+
+
+class SandboxRecoveryError(RuntimeError):
+    """A fatal error occurred during CoW transaction recovery.
+    
+    Raised when a WAL replay detects path traversal attempts, malformed data,
+    or irreconcilable concurrency conflicts (where a file was modified externally
+    while the system was offline).
+    """
+    
+    def __init__(self, message: str, *, path: str = "", reason: str = "") -> None:
+        self.path = path
+        self.reason = reason
+        super().__init__(message)

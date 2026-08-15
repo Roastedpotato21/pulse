@@ -373,8 +373,9 @@ async def test_process_normal_execution(tmp_path: Path):
 @pytest.mark.anyio
 async def test_process_cancellation(tmp_path: Path):
     """Verify asyncio cancellation terminates the process."""
-    from pulse.sandbox.process import ProcessManager
     import asyncio
+
+    from pulse.sandbox.process import ProcessManager
     pm = ProcessManager()
     
     async def run():
