@@ -27,6 +27,10 @@ pythonpath = ["src"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+filterwarnings = [
+    "ignore::pulse.sandbox.api._SecurityWarning",
+    "ignore::pulse.sandbox.backend.host._SecurityWarning",
+]
 
 [dependency-groups]
 dev = [

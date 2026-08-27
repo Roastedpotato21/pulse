@@ -106,6 +106,7 @@ class ProcessManager:
             if proc is not None:
                 if proc.returncode is None:
                     await self._terminate_tree(proc, policy.termination_grace_seconds)
+                self._close_process_transport(proc)
                 self._active_processes.discard(proc)
 
         exit_code = -9 if reason == "timeout" else (proc.returncode if proc and proc.returncode is not None else -1)
@@ -221,6 +222,13 @@ class ProcessManager:
 
         except (ProcessLookupError, PermissionError):
             pass
+
+    @staticmethod
+    def _close_process_transport(proc: asyncio.subprocess.Process) -> None:
+        """Close subprocess pipes after output collection and reaping."""
+        transport = getattr(proc, "_transport", None)
+        if transport is not None:
+            transport.close()
 
     @staticmethod
     def _reap_remaining_group(pgid: int) -> None:
