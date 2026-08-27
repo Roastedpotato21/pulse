@@ -67,6 +67,15 @@ class LeaseLostError(Exception):
         self.task_id = task_id
 
 
+class RetryDeferredError(Exception):
+    """Raised when a queued task has not reached its durable retry deadline."""
+
+    def __init__(self, task_id: str, retry_at: str):
+        super().__init__(f"Task {task_id} retry is deferred until {retry_at}.")
+        self.task_id = task_id
+        self.retry_at = retry_at
+
+
 class TaskStatus(Enum):
     """Current state of a managed task."""
 
@@ -78,6 +87,7 @@ class TaskStatus(Enum):
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
     RECOVERY_PENDING = "RECOVERY_PENDING"
+    DEAD_LETTER = "DEAD_LETTER"
 
 
 class TaskPriority(Enum):
@@ -133,6 +143,23 @@ class TaskEvent:
     payload: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True, slots=True)
+class TaskOutboxEvent:
+    """Durable lifecycle event emitted with a task-store transaction.
+
+    Consumers may safely retry delivery: events are immutable, ordered per
+    task, and remain available until an explicit acknowledgement is recorded.
+    """
+
+    event_id: str
+    task_id: str
+    sequence: int
+    event_type: str
+    payload: dict[str, Any]
+    created_at: str
+    delivered_at: str | None = None
+
+
 @dataclass
 class Task:
     """A unit of work managed by Pulse."""
@@ -158,6 +185,8 @@ class Task:
     lease_expires_at: str | None = None
     lease_epoch: int = 0
     owner_pid: int | None = None
+    remote_execution_id: str | None = None
+    next_retry_at: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize Task object to JSON-compatible dictionary."""
@@ -183,6 +212,8 @@ class Task:
             "lease_expires_at": self.lease_expires_at,
             "lease_epoch": self.lease_epoch,
             "owner_pid": self.owner_pid,
+            "remote_execution_id": self.remote_execution_id,
+            "next_retry_at": self.next_retry_at,
         }
 
     @classmethod
@@ -224,6 +255,8 @@ class Task:
             lease_expires_at=data.get("lease_expires_at"),
             lease_epoch=int(data.get("lease_epoch", 0)),
             owner_pid=data.get("owner_pid"),
+            remote_execution_id=data.get("remote_execution_id"),
+            next_retry_at=data.get("next_retry_at"),
         )
 
 
@@ -274,9 +307,24 @@ class TaskStore:
                     owner_id TEXT,
                     lease_expires_at TEXT,
                     lease_epoch INTEGER NOT NULL DEFAULT 0,
-                    owner_pid INTEGER
+                    owner_pid INTEGER,
+                    remote_execution_id TEXT,
+                    next_retry_at TEXT
                 );
                 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
+                CREATE TABLE IF NOT EXISTS task_outbox_events (
+                    event_id TEXT PRIMARY KEY,
+                    task_id TEXT NOT NULL,
+                    sequence INTEGER NOT NULL,
+                    event_type TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    delivered_at TEXT,
+                    UNIQUE(task_id, sequence),
+                    FOREIGN KEY(task_id) REFERENCES tasks(id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_task_outbox_pending
+                    ON task_outbox_events(delivered_at, created_at);
                 """
             )
             # Safe schema migration for OCC
@@ -296,6 +344,10 @@ class TaskStore:
                 )
             if "owner_pid" not in columns:
                 conn.execute("ALTER TABLE tasks ADD COLUMN owner_pid INTEGER")
+            if "remote_execution_id" not in columns:
+                conn.execute("ALTER TABLE tasks ADD COLUMN remote_execution_id TEXT")
+            if "next_retry_at" not in columns:
+                conn.execute("ALTER TABLE tasks ADD COLUMN next_retry_at TEXT")
 
     def _migrate_legacy_json(self) -> None:
         legacy_file = self.store_dir / "tasks.json"
@@ -340,8 +392,8 @@ class TaskStore:
                     INSERT INTO tasks (
                         id, title, goal, priority, status, progress, retries, 
                         max_retries, depends_on, created_at, updated_at, 
-                        result, error, metadata, checkpoints, history, version, owner_id, lease_expires_at, lease_epoch, owner_pid
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        result, error, metadata, checkpoints, history, version, owner_id, lease_expires_at, lease_epoch, owner_pid, remote_execution_id, next_retry_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task.id,
@@ -365,8 +417,11 @@ class TaskStore:
                         task.lease_expires_at,
                         task.lease_epoch,
                         task.owner_pid,
+                        task.remote_execution_id,
+                        task.next_retry_at,
                     ),
                 )
+                self._append_outbox_event(conn, task, "task_created")
         except sqlite3.Error as err:
             logger.error(f"Failed to create task {task.id}: {err}")
             raise
@@ -385,7 +440,7 @@ class TaskStore:
         try:
             with self._connect() as conn:
                 current = conn.execute(
-                    "SELECT status, owner_id, lease_epoch, lease_expires_at FROM tasks WHERE id = ?",
+                    "SELECT status, progress, remote_execution_id, owner_id, lease_epoch, lease_expires_at FROM tasks WHERE id = ?",
                     (task.id,),
                 ).fetchone()
                 if current is None:
@@ -418,6 +473,8 @@ class TaskStore:
                     task.lease_expires_at,
                     task.lease_epoch,
                     task.owner_pid,
+                    task.remote_execution_id,
+                    task.next_retry_at,
                     task.id,
                     task.version,
                 ]
@@ -443,13 +500,16 @@ class TaskStore:
                         retries=?, max_retries=?, depends_on=?, created_at=?,
                         updated_at=?, result=?, error=?, metadata=?,
                         checkpoints=?, history=?, version=version + 1,
-                        owner_id=?, lease_expires_at=?, lease_epoch=?, owner_pid=?
+                        owner_id=?, lease_expires_at=?, lease_epoch=?, owner_pid=?, remote_execution_id=?, next_retry_at=?
                     """
                     + where,
                     params,
                 )
                 if cursor.rowcount == 0:
                     raise TaskConcurrencyError(task.id)
+                event_type = self._event_type_for_update(current, task)
+                if event_type:
+                    self._append_outbox_event(conn, task, event_type)
         except sqlite3.Error as err:
             logger.error(f"Failed to update task {task.id}: {err}")
             raise
@@ -488,12 +548,112 @@ class TaskStore:
                         "lease_expires_at": row_dict.get("lease_expires_at"),
                         "lease_epoch": row_dict.get("lease_epoch", 0),
                         "owner_pid": row_dict.get("owner_pid"),
+                        "remote_execution_id": row_dict.get("remote_execution_id"),
+                        "next_retry_at": row_dict.get("next_retry_at"),
                     }
                     tasks[row_dict["id"]] = Task.from_dict(data)
             return tasks
         except (sqlite3.Error, json.JSONDecodeError) as err:
             logger.error(f"Failed to load task store: {err}")
             return {}
+
+    @staticmethod
+    def _event_type_for_update(current: sqlite3.Row | tuple[Any, ...], task: Task) -> str | None:
+        """Infer the meaningful durable event from an already-CASed update."""
+        if (
+            task.status == TaskStatus.QUEUED
+            and task.history
+            and task.history[-1].action == "retry_scheduled"
+        ):
+            return "task_retry_scheduled"
+        if current[0] != task.status.value:
+            return {
+                TaskStatus.QUEUED.value: "task_queued",
+                TaskStatus.RUNNING.value: "task_started",
+                TaskStatus.PAUSED.value: "task_paused",
+                TaskStatus.COMPLETED.value: "task_completed",
+                TaskStatus.FAILED.value: "task_failed",
+                TaskStatus.CANCELLED.value: "task_cancelled",
+                TaskStatus.RECOVERY_PENDING.value: "task_recovery_pending",
+                TaskStatus.DEAD_LETTER.value: "task_dead_lettered",
+            }.get(task.status.value, "task_updated")
+        if current[2] != task.remote_execution_id:
+            return "task_remote_execution_bound"
+        if current[1] != task.progress:
+            return "task_progress"
+        return None
+
+    @staticmethod
+    def _append_outbox_event(
+        conn: sqlite3.Connection, task: Task, event_type: str
+    ) -> None:
+        """Append a task event in the caller's transaction."""
+        sequence = conn.execute(
+            "SELECT COALESCE(MAX(sequence), 0) + 1 FROM task_outbox_events WHERE task_id = ?",
+            (task.id,),
+        ).fetchone()[0]
+        payload = {
+            "status": task.status.value,
+            "progress": task.progress,
+            "retries": task.retries,
+            "lease_epoch": task.lease_epoch,
+            "remote_execution_id": task.remote_execution_id,
+            "next_retry_at": task.next_retry_at,
+        }
+        conn.execute(
+            """
+            INSERT INTO task_outbox_events (
+                event_id, task_id, sequence, event_type, payload, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                f"evt-{uuid.uuid4().hex}",
+                task.id,
+                sequence,
+                event_type,
+                json.dumps(payload, sort_keys=True),
+                task.updated_at,
+            ),
+        )
+
+    def pending_outbox_events(self, *, limit: int = 100) -> list[TaskOutboxEvent]:
+        """Return undelivered lifecycle events in global creation order."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT event_id, task_id, sequence, event_type, payload, created_at, delivered_at
+                FROM task_outbox_events
+                WHERE delivered_at IS NULL
+                ORDER BY created_at, task_id, sequence
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [
+            TaskOutboxEvent(
+                event_id=row[0],
+                task_id=row[1],
+                sequence=row[2],
+                event_type=row[3],
+                payload=json.loads(row[4]),
+                created_at=row[5],
+                delivered_at=row[6],
+            )
+            for row in rows
+        ]
+
+    def acknowledge_outbox_event(self, event_id: str) -> bool:
+        """Idempotently mark one durable event delivered."""
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE task_outbox_events
+                SET delivered_at = ?
+                WHERE event_id = ? AND delivered_at IS NULL
+                """,
+                (datetime.now(UTC).isoformat(), event_id),
+            )
+        return cursor.rowcount == 1
 
 
 EventListener = Callable[[TaskEvent], Awaitable[None] | None]
@@ -778,9 +938,12 @@ class TaskManager:
             # execution may have a different provider-generated identifier.
             # Persisting this mapping at submission time lets recovery query
             # the same operation rather than accidentally treating it as lost.
-            remote_execution_id = (
-                task.metadata.get("remote_execution_id", task_id) if task else task_id
-            )
+            if task:
+                remote_execution_id = task.remote_execution_id or task.metadata.get(
+                    "remote_execution_id", task_id
+                )
+            else:
+                remote_execution_id = task_id
             status = await client.status(remote_execution_id)
             if status == "RUNNING":
                 await self._record_recovery_pending(
@@ -1026,6 +1189,14 @@ class TaskManager:
                         f"Cannot start task {task_id}; unresolved dependencies: {unresolved}"
                     )
 
+                if task.status == TaskStatus.QUEUED and task.next_retry_at:
+                    try:
+                        if datetime.now(UTC) < datetime.fromisoformat(task.next_retry_at):
+                            raise RetryDeferredError(task_id, task.next_retry_at)
+                    except ValueError:
+                        # A malformed legacy deadline must not block recovery.
+                        task.next_retry_at = None
+
                 # Guard acquisition
                 if task.status not in (TaskStatus.QUEUED, TaskStatus.PENDING):
                     # We can also steal it if it's RUNNING but expired.
@@ -1048,9 +1219,21 @@ class TaskManager:
                 previous_epoch = task.lease_epoch
 
                 task.status = TaskStatus.RUNNING
+                task.next_retry_at = None
                 task.owner_id = self.worker_id
                 task.owner_pid = os.getpid()
                 task.lease_epoch += 1
+                if task.metadata.get("execution_mode") == "remote":
+                    # Bind the external operation *before* the task is
+                    # persisted as RUNNING.  The identifier is stable for
+                    # retries of this attempt and changes for a new fenced
+                    # attempt, preventing recovery from attaching to stale
+                    # remote work.
+                    task.remote_execution_id = (
+                        task.metadata.get("remote_execution_id")
+                        if task.lease_epoch == 1
+                        else None
+                    ) or f"{task.id}-attempt-{task.lease_epoch}"
                 task.lease_expires_at = (
                     datetime.now(UTC) + timedelta(seconds=self.lease_duration)
                 ).isoformat()
@@ -1082,6 +1265,24 @@ class TaskManager:
         await self._emit_event("task_started", task)
         self._log_telemetry("task_started", task_id=task_id)
         return task
+
+    async def remote_execution_id_for_task(self, task_id: str) -> str:
+        """Return the durable remote ID for the caller's active task attempt.
+
+        A remote dispatcher calls this before submission and passes the
+        returned value as the backend's ``execution_id``.  Requiring the
+        active lease prevents an arbitrary caller from inventing a recovery
+        target or rebinding another worker's task.
+        """
+        async with self._lock:
+            task = self._check_ownership(self._get_task_or_raise(task_id))
+            if task.metadata.get("execution_mode") != "remote":
+                raise ValueError(f"Task {task_id} is not configured for remote execution.")
+            if not task.remote_execution_id:
+                raise RuntimeError(
+                    f"Task {task_id} has no durable remote execution binding."
+                )
+            return task.remote_execution_id
 
     async def update_progress(
         self, task_id: str, progress: float, detail: str = ""
@@ -1156,16 +1357,21 @@ class TaskManager:
         return task
 
     async def resume_task(self, task_id: str) -> Task:
-        """Resume a paused or failed task from its latest checkpoint."""
+        """Manually resume a paused, failed, or dead-lettered task."""
         for attempt in range(3):
             async with self._lock:
                 task = self._get_task_or_raise(task_id)
-                if task.status not in (TaskStatus.PAUSED, TaskStatus.FAILED):
+                if task.status not in (
+                    TaskStatus.PAUSED,
+                    TaskStatus.FAILED,
+                    TaskStatus.DEAD_LETTER,
+                ):
                     raise ValueError(
                         f"Task {task_id} is in state {task.status.value} and cannot be resumed."
                     )
 
                 task.status = TaskStatus.QUEUED
+                task.next_retry_at = None
                 task.updated_at = datetime.now(UTC).isoformat()
                 if task_id not in self._queue:
                     self._queue.append(task_id)
@@ -1289,8 +1495,14 @@ class TaskManager:
         self._log_telemetry("task_completed", task_id=task_id)
         return task
 
-    async def fail_task(self, task_id: str, error: str) -> Task:
-        """Mark task as FAILED or trigger retry if max_retries not reached."""
+    async def fail_task(
+        self,
+        task_id: str,
+        error: str,
+        *,
+        retryable: bool = True,
+    ) -> Task:
+        """Record failure with bounded exponential retry or dead-lettering."""
         for attempt in range(3):
             async with self._lock:
                 task = self._check_ownership(self._get_task_or_raise(task_id))
@@ -1304,8 +1516,12 @@ class TaskManager:
                 task.updated_at = datetime.now(UTC).isoformat()
                 task.error = error
 
-                if task.retries <= task.max_retries:
+                if retryable and task.retries <= task.max_retries:
                     task.status = TaskStatus.QUEUED
+                    retry_delay = self._retry_delay_seconds(task.retries)
+                    task.next_retry_at = (
+                        datetime.now(UTC) + timedelta(seconds=retry_delay)
+                    ).isoformat()
                     if task_id not in self._queue:
                         self._queue.append(task_id)
                     self._sort_queue()
@@ -1313,22 +1529,29 @@ class TaskManager:
                         TaskExecutionRecord(
                             timestamp=datetime.now(UTC).isoformat(),
                             action="retry_scheduled",
-                            detail=f"Retry {task.retries}/{task.max_retries} after error: {error[:60]}",
+                            detail=(
+                                f"Retry {task.retries}/{task.max_retries} in "
+                                f"{retry_delay}s after error: {error[:60]}"
+                            ),
                             success=False,
                         )
                     )
                     event_name = "task_retry_scheduled"
                 else:
-                    task.status = TaskStatus.FAILED
+                    task.status = TaskStatus.DEAD_LETTER
+                    task.next_retry_at = None
                     task.history.append(
                         TaskExecutionRecord(
                             timestamp=datetime.now(UTC).isoformat(),
-                            action="failed",
-                            detail=f"Task failed permanently: {error[:60]}",
+                            action="dead_lettered",
+                            detail=(
+                                "Task requires manual resolution: "
+                                f"{error[:60]}"
+                            ),
                             success=False,
                         )
                     )
-                    event_name = "task_failed"
+                    event_name = "task_dead_lettered"
 
                 try:
                     self._update_task_with_fence(task, fence)
@@ -1429,6 +1652,20 @@ class TaskManager:
             tasks = [t for t in tasks if t.status == status]
         return sorted(tasks, key=lambda t: (-t.priority.value, t.created_at))
 
+    @staticmethod
+    def _retry_delay_seconds(retries: int) -> int:
+        """Return a bounded deterministic retry delay for durable scheduling."""
+        return min(60, 2 ** max(0, retries - 1))
+
+    @staticmethod
+    def _retry_ready(task: Task) -> bool:
+        if not task.next_retry_at:
+            return True
+        try:
+            return datetime.now(UTC) >= datetime.fromisoformat(task.next_retry_at)
+        except ValueError:
+            return True
+
     async def process_queue(
         self, worker_func: Callable[[Task], Awaitable[str]]
     ) -> list[Task]:
@@ -1440,7 +1677,11 @@ class TaskManager:
         leaves recovery to the new owner.
         """
         async with self._lock:
-            ready_ids = list(self._queue)
+            ready_ids = [
+                task_id
+                for task_id in self._queue
+                if task_id in self._tasks and self._retry_ready(self._tasks[task_id])
+            ]
 
         processed: list[Task] = []
         for task_id in ready_ids:
@@ -1455,6 +1696,8 @@ class TaskManager:
         """Run one local worker under the authoritative lease supervisor."""
         try:
             task = await self.start_task(task_id)
+        except RetryDeferredError:
+            return None
         except Exception as err:  # noqa: BLE001
             try:
                 return await self.fail_task(task_id, str(err))

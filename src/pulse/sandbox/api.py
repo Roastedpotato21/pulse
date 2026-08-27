@@ -258,6 +258,8 @@ class Sandbox:
         command: str | list[str],
         cwd: Path | str | None = None,
         env: dict[str, str] | None = None,
+        *,
+        execution_id: str | None = None,
     ) -> ProcessResult:
         """Execute a shell command inside the isolated container backend.
 
@@ -271,7 +273,7 @@ class Sandbox:
         if not self._initialized:
             await self.initialize()
 
-        execution_id = str(uuid.uuid4())
+        execution_id = execution_id or str(uuid.uuid4())
         execution = SandboxExecution(execution_id, self.audit_logger)
         execution.transition(LifecycleState.STARTING)
 

@@ -77,10 +77,9 @@ RECOVERY_PENDING -> QUEUED | COMPLETED | FAILED
    is not evidence that the executor stopped.
 4. `COMPLETED`, `FAILED`, and `CANCELLED` clear active ownership. A completed
    result is immutable except through an explicit new task/retry workflow.
-5. **Phase 1 requirement:** remote dispatch persists its remote execution ID
-   before submission. Recovery reconciles that exact ID, not a generated
-   replacement. This binding is not yet automatic in the current dispatch
-   path and must not be claimed as a release guarantee.
+5. `RemoteTaskExecutor` obtains the attempt ID from `TaskManager` before sandbox
+   submission and passes it as the backend execution ID. Recovery reconciles
+   that exact ID, not a generated replacement.
 
 ## Sandbox Lifecycle Contract
 
