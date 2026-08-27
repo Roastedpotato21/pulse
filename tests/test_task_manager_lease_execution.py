@@ -340,7 +340,7 @@ def test_process_queue_cancellation(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_completion_lease_loss_race(tmp_path: Path) -> None:
+def test_completion_lease_loss_race(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """When worker completion and lease loss happen near-simultaneously,
     the system must use OCC/ownership to determine the outcome:
     - If ownership is valid at complete_task time: COMPLETED is correct.
@@ -380,6 +380,9 @@ def test_completion_lease_loss_race(tmp_path: Path) -> None:
             heartbeat_interval=0.05,
             lease_duration=5.0,
         )
+        # The previous executor has stopped; only then may recovery requeue
+        # the fenced task for a new owner.
+        monkeypatch.setattr(tm2, "_process_alive", lambda _pid: False)
         await tm2.recover_tasks()
         await tm2.start_task(t.id)
 
@@ -412,6 +415,45 @@ def test_fresh_non_owner_cannot_mutate_running_task(tmp_path: Path) -> None:
             await intruder.complete_task(task.id, "unauthorized")
         with pytest.raises(StaleWorkerError):
             await intruder.update_progress(task.id, 50.0)
+
+    asyncio.run(run())
+
+
+def test_recovery_does_not_requeue_while_foreign_owner_pid_is_alive(
+    tmp_path: Path,
+) -> None:
+    """A process-local registry cannot authorize takeover of another process.
+
+    The recovery manager has no local execution record for the owner, but the
+    persisted PID is still live.  The task must remain fenced until the owner
+    exits or acknowledges cancellation rather than being duplicated.
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    async def run() -> None:
+        owner = TaskManager(workspace, heartbeat_interval=0.1, lease_duration=1.0)
+        task = await owner.create_task("Foreign owner liveness")
+        await owner.queue_task(task.id)
+        running = await owner.start_task(task.id)
+        running.lease_expires_at = "2000-01-01T00:00:00+00:00"
+        owner.store.update_task(
+            running,
+            expected_status=TaskStatus.RUNNING,
+            expected_owner_id=owner.worker_id,
+            expected_lease_epoch=running.lease_epoch,
+        )
+        running.version += 1
+
+        recovery = TaskManager(workspace, store=TaskStore(workspace))
+        await recovery.recover_tasks()
+
+        recovered = recovery.get_task(task.id)
+        assert recovered is not None
+        assert recovered.status == TaskStatus.RECOVERY_PENDING
+        assert recovered.owner_id == owner.worker_id
+        assert recovered.owner_pid == running.owner_pid
+        assert "still alive" in recovered.history[-1].detail
 
     asyncio.run(run())
 

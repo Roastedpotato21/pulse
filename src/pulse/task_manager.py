@@ -696,6 +696,21 @@ class TaskManager:
             if active_worker and not active_worker.done():
                 active_worker.cancel()
             return
+
+        # ``_active_executions`` is intentionally process-local.  A recovery
+        # manager in another process cannot use its absence as proof that the
+        # original executor stopped.  Requeueing in that state would allow two
+        # workers to continue the same task.  Keep the durable fence pending
+        # until the recorded local owner is known to be gone (or that owner
+        # acknowledges its own cancellation above).
+        if owner_pid and self._process_alive(owner_pid):
+            await self._record_recovery_pending(
+                task_id,
+                owner_id,
+                owner_epoch,
+                "Previous local executor is still alive; awaiting termination acknowledgement.",
+            )
+            return
         await self._finalize_recovery_requeue(task_id, owner_id, owner_epoch)
 
     async def _finalize_recovery_requeue(
@@ -1421,14 +1436,9 @@ class TaskManager:
 
         Each worker_func invocation is wrapped in an asyncio.Task that is
         raced against the heartbeat task via asyncio.wait(FIRST_COMPLETED).
-        If the heartbeat detects ownership loss (StaleWorkerError), it
-        raises LeaseLostError, which causes the supervisor to immediately
-        cancel worker_func.  This prevents the duplicate-execution
-        vulnerability where a stale worker continues running after its
-        lease has been recovered by another process.
+        If the heartbeat detects a lost lease, it cancels the worker and
+        leaves recovery to the new owner.
         """
-        processed: list[Task] = []
-
         async with self._lock:
             ready_ids = list(self._queue)
 
@@ -1437,64 +1447,6 @@ class TaskManager:
             result = await self.execute_task(task_id, worker_func)
             if result is not None:
                 processed.append(result)
-        return processed
-
-        for task_id in ready_ids:
-            try:
-                task = await self.start_task(task_id)
-            # Intentionally broad to isolate start failures.
-            except Exception as err:  # noqa: BLE001
-                logger.warning(f"Failed to start task {task_id}: {err}")
-                try:
-                    failed = await self.fail_task(task_id, str(err))
-                    processed.append(failed)
-                except (StaleWorkerError, LeaseLostError):
-                    pass
-                continue
-
-            # Create supervised execution: worker + heartbeat run concurrently.
-            # The heartbeat was already started by start_task().
-            worker_task = asyncio.create_task(worker_func(task))
-            heartbeat_task = self._heartbeat_tasks.get(task_id)
-
-            try:
-                result_str = await self._supervise_execution(
-                    task_id, worker_task, heartbeat_task
-                )
-                completed = await self.complete_task(task_id, result_str)
-                processed.append(completed)
-            except LeaseLostError:
-                # Ownership lost — cancel worker, do NOT complete/fail.
-                # The recovered/new owner will handle this task.
-                logger.warning(
-                    f"Lease lost for task {task_id}; worker cancelled. "
-                    f"Recovery by new owner expected."
-                )
-            except asyncio.CancelledError:
-                # process_queue itself was cancelled — clean up both tasks.
-                raise
-            except StaleWorkerError:
-                # complete_task raised StaleWorkerError — ownership lost
-                # between worker completion and finalization.  Do nothing;
-                # the new owner will handle the task.
-                logger.warning(
-                    f"Stale worker for task {task_id} at completion; discarding result."
-                )
-            # Intentionally broad to isolate execution boundaries and prevent crashes.
-            except Exception as err:  # noqa: BLE001
-                # Worker raised an exception — normal failure path.
-                try:
-                    failed = await self.fail_task(task_id, str(err))
-                    processed.append(failed)
-                except (StaleWorkerError, LeaseLostError):
-                    logger.warning(f"Cannot fail task {task_id}: ownership lost.")
-            finally:
-                # Every execution path observes both children before moving on.
-                await self._cancel_and_await(worker_task)
-                await self._cancel_and_await(heartbeat_task)
-                if self._heartbeat_tasks.get(task_id) is heartbeat_task:
-                    del self._heartbeat_tasks[task_id]
-
         return processed
 
     async def execute_task(

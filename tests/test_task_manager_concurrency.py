@@ -232,7 +232,9 @@ def test_taskstore_cannot_steal_healthy_lease(tmp_path: Path):
             
     asyncio.run(run())
 
-def test_taskstore_stale_worker_rejected(tmp_path: Path):
+def test_taskstore_stale_worker_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     """Test that a worker whose lease was stolen cannot perform terminal operations or heartbeats."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -256,7 +258,9 @@ def test_taskstore_stale_worker_rejected(tmp_path: Path):
         tm1._stop_heartbeat(task.id)
         await asyncio.sleep(0.3)
         
-        # Worker 2 recovers the task
+        # Worker 2 recovers after the prior executor has terminated.  An
+        # expired lease alone cannot authorize takeover while its PID lives.
+        monkeypatch.setattr(tm2, "_process_alive", lambda _pid: False)
         await tm2.recover_tasks()
         task2 = tm2.get_task(task.id)
         assert task2.status == TaskStatus.QUEUED
