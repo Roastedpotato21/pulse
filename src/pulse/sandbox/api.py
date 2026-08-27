@@ -103,6 +103,7 @@ class Sandbox:
         )
         self.scrubber = SecretScrubber(secrets=secrets)
         self.limits = limits or ResourcePolicy()
+        self._limits_explicit = limits is not None
         self._unsafe_host_execution = unsafe_host_execution
 
         log_file = audit_log_path or (
@@ -399,7 +400,12 @@ class Sandbox:
                     workspace_root=self.workspace_root,
                     cwd=target_dir,
                     env=env,
-                    limits=self.limits,
+                    # Let an explicitly configured backend ProcessManager
+                    # supply its own default when the Sandbox caller did not
+                    # choose a policy.  This preserves backend-level timeout
+                    # configuration and avoids silently overriding it with a
+                    # new generic default on every call.
+                    limits=self.limits if self._limits_explicit else None,
                     network_policy=effective_network_policy,
                     secret_policy=effective_secret_policy,
                     execution_id=execution_id,

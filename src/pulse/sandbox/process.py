@@ -51,13 +51,21 @@ class ProcessManager:
     """Runs isolated process groups with timeout, cancellation and output caps."""
     def __init__(self) -> None:
         self._active_processes: set[asyncio.subprocess.Process] = set()
+        # Backends may configure a process-wide default policy.  Per-call
+        # limits remain authoritative when supplied to ``execute``.
+        self.limits: ResourceLimits | ResourcePolicy = ResourcePolicy()
 
     @property
     def active_count(self) -> int:
         return len(self._active_processes)
 
     async def execute(self, command: str | list[str], cwd: Path | str | None = None, env: dict[str, str] | None = None, limits: ResourceLimits | ResourcePolicy | None = None, output_callback: typing.Callable[[str, bytes], typing.Awaitable[None]] | None = None) -> ProcessResult:
-        controller = ResourceController(limits if isinstance(limits, ResourcePolicy) else (limits or ResourceLimits()).to_policy())
+        effective_limits = limits if limits is not None else self.limits
+        controller = ResourceController(
+            effective_limits
+            if isinstance(effective_limits, ResourcePolicy)
+            else effective_limits.to_policy()
+        )
         policy = controller.policy
         cmd_str = command if isinstance(command, str) else " ".join(command)
         extra_kwargs: dict[str, Any] = {"close_fds": True}
@@ -170,31 +178,16 @@ class ProcessManager:
             return
         try:
             if sys.platform == "win32":
-                killer = await asyncio.create_subprocess_exec(
-                    "taskkill", "/PID", str(proc.pid), "/T", "/F",
-                    stdout=asyncio.subprocess.DEVNULL,
-                    stderr=asyncio.subprocess.DEVNULL,
-                )
-                # taskkill is itself an external process and can hang (for
-                # example while the Windows process tree is exiting).  A
-                # timeout must never turn a sandbox execution timeout into an
-                # unbounded wait.
+                # ``taskkill /T`` can itself hang in constrained Windows
+                # sessions.  Never let a helper process defeat the sandbox
+                # deadline.  Terminating the direct child is the reliable
+                # best-effort host fallback; container backends provide the
+                # strong tree-containment guarantee on Windows.
                 try:
-                    await asyncio.wait_for(killer.wait(), timeout=max(1.0, grace_seconds + 1.0))
-                except TimeoutError:
-                    try:
-                        killer.kill()
-                        await asyncio.wait_for(killer.wait(), timeout=1.0)
-                    except (ProcessLookupError, TimeoutError):
-                        pass
-                try:
+                    proc.kill()
                     await asyncio.wait_for(proc.wait(), timeout=max(1.0, grace_seconds + 1.0))
-                except TimeoutError:
-                    try:
-                        proc.kill()
-                        await asyncio.wait_for(proc.wait(), timeout=1.0)
-                    except (ProcessLookupError, TimeoutError):
-                        logger.warning("Timed out reaping Windows process tree rooted at %s.", proc.pid)
+                except (ProcessLookupError, TimeoutError):
+                    logger.warning("Timed out reaping Windows process rooted at %s.", proc.pid)
                 return
 
             # Cache pgid once to avoid PID-recycling race on repeated lookups.
