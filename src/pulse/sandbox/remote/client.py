@@ -8,10 +8,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import uuid
 from collections.abc import AsyncGenerator
 from typing import Any
 
 import websockets
+from websockets.protocol import State
 
 from pulse.sandbox.remote.models import (
     ExecutionResultModel,
@@ -37,36 +39,47 @@ class RemoteClient(RemoteSandboxClient):
 
     async def connect(self) -> None:
         """Establish the WebSocket connection."""
-        if self._ws and not self._ws.closed:
+        if self._ws and getattr(self._ws, "state", None) is not State.CLOSED:
             return
-            
+
         headers = {"Authorization": f"Bearer {self.auth_token}"}
-        
+
         import os
         import ssl
+
         ssl_context = None
-        
+
         tls_cert = os.environ.get("PULSE_TLS_CERT")
         tls_key = os.environ.get("PULSE_TLS_KEY")
         tls_ca = os.environ.get("PULSE_TLS_CA")
-        
+
         if self.endpoint_url.startswith("wss://"):
             if not (tls_cert and tls_key and tls_ca):
-                raise ValueError("mTLS certificates (PULSE_TLS_CERT, PULSE_TLS_KEY, PULSE_TLS_CA) are required for wss://")
+                raise ValueError(
+                    "mTLS certificates (PULSE_TLS_CERT, PULSE_TLS_KEY, PULSE_TLS_CA) are required for wss://"
+                )
             try:
-                ssl_context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH, cafile=tls_ca)
+                ssl_context = ssl.create_default_context(
+                    ssl.Purpose.SERVER_AUTH, cafile=tls_ca
+                )
                 ssl_context.load_cert_chain(certfile=tls_cert, keyfile=tls_key)
             except (ssl.SSLError, OSError) as e:
                 raise RuntimeError(f"Failed to load mTLS certificates: {e}")
-        elif not ("127.0.0.1" in self.endpoint_url or "localhost" in self.endpoint_url or "[::1]" in self.endpoint_url):
-            raise RuntimeError("Insecure ws:// connections are only allowed for loopback (127.0.0.1).")
-                
+        elif not (
+            "127.0.0.1" in self.endpoint_url
+            or "localhost" in self.endpoint_url
+            or "[::1]" in self.endpoint_url
+        ):
+            raise RuntimeError(
+                "Insecure ws:// connections are only allowed for loopback (127.0.0.1)."
+            )
+
         self._ws = await websockets.connect(
-            self.endpoint_url, 
+            self.endpoint_url,
             additional_headers=headers,
             ping_interval=20,
             ping_timeout=20,
-            ssl=ssl_context
+            ssl=ssl_context,
         )
         self._listener_task = asyncio.create_task(self._listen())
 
@@ -91,41 +104,82 @@ class RemoteClient(RemoteSandboxClient):
                     payload = data.get("payload", {})
 
                     if msg_type == "result":
-                        result = ExecutionResultModel.from_dict(payload)
-                        fut = self._results.get(result.execution_id)
+                        execution_id = payload.get("execution_id")
+                        fut = self._results.get(execution_id) if execution_id else None
                         if fut and not fut.done():
-                            fut.set_result(result)
-                        
-                        queue = self._queues.get(result.execution_id)
+                            fut.set_result(ExecutionResultModel.from_dict(payload))
+                        elif execution_id:
+                            logger.warning(
+                                "Received result for unknown execution %s.",
+                                execution_id,
+                            )
+
+                        queue = self._queues.get(execution_id or "")
                         if queue:
                             await queue.put(None)
-                            
+
                     elif msg_type == "response":
-                        # We use the execution_id if available, or just resolve all pending responses.
-                        # For a single connection, we can simplify this.
-                        # We'll just grab the first pending response future if no execution_id.
+                        request_id = payload.get("request_id")
+                        if request_id and request_id in self._responses:
+                            fut = self._responses[request_id]
+                            if not fut.done():
+                                fut.set_result(payload)
+                            continue
                         eid = payload.get("execution_id")
                         if eid and eid in self._responses:
                             fut = self._responses[eid]
                             if not fut.done():
                                 fut.set_result(payload)
                         else:
-                            for fut in self._responses.values():
-                                if not fut.done():
-                                    fut.set_result(payload)
-                                    break
+                            logger.warning(
+                                "Received response without a known request ID: %s",
+                                payload,
+                            )
 
                     elif msg_type == "stream":
                         stream_data = payload.get("data", "")
                         stream_type = payload.get("stream", "stdout")
-                        for queue in self._queues.values():
+                        execution_id = payload.get("execution_id")
+                        queue = self._queues.get(execution_id or "")
+                        if queue:
                             await queue.put((stream_type, stream_data))
-                            
+
                     elif msg_type == "error":
-                        logger.error(f"Remote server error: {payload}")
-                        
+                        request_id = (
+                            payload.get("request_id")
+                            if isinstance(payload, dict)
+                            else None
+                        )
+                        error = (
+                            payload.get("message", "Remote server error")
+                            if isinstance(payload, dict)
+                            else str(payload)
+                        )
+                        fut = self._responses.get(request_id) if request_id else None
+                        if fut and not fut.done():
+                            fut.set_exception(RuntimeError(error))
+                        else:
+                            logger.error("Remote server error: %s", error)
+
                 except (KeyError, ValueError, RuntimeError) as e:
-                    logger.error(f"Error processing server message: {e}")
+                    # check if the message is a direct string payload from attach history
+                    if (
+                        isinstance(message, str)
+                        and message.startswith("{")
+                        and '"stream"' in message
+                    ):
+                        try:
+                            line_data = json.loads(message)
+                            if line_data.get("type") == "stream":
+                                stream_payload = line_data.get("payload", {})
+                                stream_data = stream_payload.get("data", "")
+                                stream_type = stream_payload.get("stream", "stdout")
+                                for queue in self._queues.values():
+                                    await queue.put((stream_type, stream_data))
+                        except (TypeError, ValueError):
+                            logger.error(f"Error processing server message: {e}")
+                    else:
+                        logger.error(f"Error processing server message: {e}")
         except websockets.exceptions.ConnectionClosed:
             logger.info("Connection to remote server closed.")
             for fut in self._results.values():
@@ -140,46 +194,57 @@ class RemoteClient(RemoteSandboxClient):
     async def submit(self, request: SubmitExecutionRequest) -> SubmitExecutionResponse:
         """Submit an execution request to the remote worker."""
         await self.connect()
-        
-        self._results[request.execution_id] = asyncio.Future()
-        self._responses[request.execution_id] = asyncio.Future()
+
+        self._results[request.execution_id] = asyncio.get_running_loop().create_future()
+        self._responses[request.execution_id] = (
+            asyncio.get_running_loop().create_future()
+        )
         self._queues[request.execution_id] = asyncio.Queue()
-        
-        await self._ws.send(json.dumps({
-            "action": "submit",
-            "payload": request.to_dict()
-        }))
-        
+
+        payload = request.to_dict()
+        payload["request_id"] = request.execution_id
+        await self._ws.send(
+            json.dumps(
+                {
+                    "action": "submit",
+                    "payload": payload,
+                }
+            )
+        )
+
         resp = await self._responses[request.execution_id]
-        return SubmitExecutionResponse(execution_id=request.execution_id, status=resp.get("status", "STARTING"))
-        
+        return SubmitExecutionResponse(
+            execution_id=request.execution_id, status=resp.get("status", "STARTING")
+        )
+
     async def cancel(self, execution_id: str) -> None:
         """Cancel an ongoing execution on the remote worker."""
-        if not self._ws or self._ws.closed:
+        if not self._ws or getattr(self._ws, "state", None) is State.CLOSED:
             return
-            
-        await self._ws.send(json.dumps({
-            "action": "cancel",
-            "payload": {"execution_id": execution_id}
-        }))
-        
+
+        await self._ws.send(
+            json.dumps({"action": "cancel", "payload": {"execution_id": execution_id}})
+        )
+
     async def get_result(self, execution_id: str) -> ExecutionResultModel:
         """Wait for and retrieve the final execution result."""
         fut = self._results.get(execution_id)
         if not fut:
             raise ValueError(f"No active execution found for {execution_id}")
-            
+
         try:
             return await fut
         finally:
             self._results.pop(execution_id, None)
-            
-    async def stream_output(self, execution_id: str) -> AsyncGenerator[tuple[str, str], None]:
+
+    async def stream_output(
+        self, execution_id: str
+    ) -> AsyncGenerator[tuple[str, str], None]:
         """Stream stdout and stderr from the remote execution."""
         queue = self._queues.get(execution_id)
         if not queue:
             return
-            
+
         try:
             while True:
                 item = await queue.get()
@@ -188,51 +253,126 @@ class RemoteClient(RemoteSandboxClient):
                 yield item
         finally:
             self._queues.pop(execution_id, None)
-            
+
+    async def status(self, execution_id: str) -> str:
+        """Query authoritative remote state."""
+        await self.connect()
+        fut = asyncio.get_running_loop().create_future()
+        temp_key = f"status-{uuid.uuid4().hex}"
+        self._responses[temp_key] = fut
+        try:
+            await self._ws.send(
+                json.dumps(
+                    {
+                        "action": "status",
+                        "payload": {
+                            "execution_id": execution_id,
+                            "request_id": temp_key,
+                        },
+                    }
+                )
+            )
+            resp = await fut
+            return resp.get("status", "NOT_FOUND")
+        finally:
+            self._responses.pop(temp_key, None)
+
+    async def attach(self, execution_id: str) -> ExecutionResultModel:
+        """Attach to a live execution and stream results, returning the final result."""
+        await self.connect()
+
+        # Setup tracking
+        self._results[execution_id] = asyncio.get_running_loop().create_future()
+        request_id = f"attach-{uuid.uuid4().hex}"
+        self._responses[request_id] = asyncio.get_running_loop().create_future()
+        self._queues[execution_id] = asyncio.Queue()
+
+        await self._ws.send(
+            json.dumps(
+                {
+                    "action": "attach",
+                    "payload": {"execution_id": execution_id, "request_id": request_id},
+                }
+            )
+        )
+
+        fut = self._results.get(execution_id)
+        if not fut:
+            raise ValueError(f"No active execution found for {execution_id}")
+
+        try:
+            response = await self._responses[request_id]
+            if response.get("status") not in {"ATTACHED", "COMPLETED", "FAILED"}:
+                raise RuntimeError(
+                    f"Remote execution {execution_id} cannot be attached: "
+                    f"{response.get('status', 'UNKNOWN')}"
+                )
+            return await fut
+        finally:
+            self._results.pop(execution_id, None)
+            self._responses.pop(request_id, None)
+            self._queues.pop(execution_id, None)
+
     async def reconcile(self) -> None:
         """Reconcile orphaned or stale executions with the remote worker."""
         await self.connect()
-        fut = asyncio.Future()
-        temp_key = f"reconcile_{id(self)}"
+        fut = asyncio.get_running_loop().create_future()
+        temp_key = f"reconcile-{uuid.uuid4().hex}"
         self._responses[temp_key] = fut
         try:
-            await self._ws.send(json.dumps({"action": "reconcile", "payload": {}}))
+            await self._ws.send(
+                json.dumps({"action": "reconcile", "payload": {"request_id": temp_key}})
+            )
             await fut
         finally:
             self._responses.pop(temp_key, None)
-        
+
     async def upload_artifact(self, execution_id: str, archive_data: bytes) -> None:
         """Upload a workspace snapshot to the remote worker before execution."""
         import base64
+
         await self.connect()
-        fut = asyncio.Future()
+        fut = asyncio.get_running_loop().create_future()
         # Use a temporary key for the response
         temp_key = f"upload_{execution_id}"
         self._responses[temp_key] = fut
         try:
-            await self._ws.send(json.dumps({
-                "action": "upload_artifact",
-                "payload": {
-                    "execution_id": execution_id,
-                    "data": base64.b64encode(archive_data).decode("ascii")
-                }
-            }))
+            await self._ws.send(
+                json.dumps(
+                    {
+                        "action": "upload_artifact",
+                        "payload": {
+                            "execution_id": execution_id,
+                            "request_id": temp_key,
+                            "data": base64.b64encode(archive_data).decode("ascii"),
+                        },
+                    }
+                )
+            )
             await fut
         finally:
             self._responses.pop(temp_key, None)
-        
+
     async def download_artifact(self, execution_id: str) -> bytes:
         """Download the modified workspace overlay from the remote worker after execution."""
         import base64
+
         await self.connect()
-        fut = asyncio.Future()
+        fut = asyncio.get_running_loop().create_future()
         temp_key = f"download_{execution_id}"
         self._responses[temp_key] = fut
         try:
-            await self._ws.send(json.dumps({
-                "action": "download_artifact",
-                "payload": {"execution_id": execution_id}
-            }))
+            await self._ws.send(
+                json.dumps(
+                    {
+                        "action": "download_artifact",
+                        "payload": {
+                            "execution_id": execution_id,
+                            "request_id": temp_key,
+                        },
+                    }
+                )
+            )
             resp = await fut
             if resp.get("status") == "DOWNLOADED" and "data" in resp:
                 return base64.b64decode(resp["data"])

@@ -170,9 +170,31 @@ class ProcessManager:
             return
         try:
             if sys.platform == "win32":
-                killer = await asyncio.create_subprocess_exec("taskkill", "/PID", str(proc.pid), "/T", "/F", stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
-                await killer.wait()
-                await proc.wait()
+                killer = await asyncio.create_subprocess_exec(
+                    "taskkill", "/PID", str(proc.pid), "/T", "/F",
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                # taskkill is itself an external process and can hang (for
+                # example while the Windows process tree is exiting).  A
+                # timeout must never turn a sandbox execution timeout into an
+                # unbounded wait.
+                try:
+                    await asyncio.wait_for(killer.wait(), timeout=max(1.0, grace_seconds + 1.0))
+                except TimeoutError:
+                    try:
+                        killer.kill()
+                        await asyncio.wait_for(killer.wait(), timeout=1.0)
+                    except (ProcessLookupError, TimeoutError):
+                        pass
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=max(1.0, grace_seconds + 1.0))
+                except TimeoutError:
+                    try:
+                        proc.kill()
+                        await asyncio.wait_for(proc.wait(), timeout=1.0)
+                    except (ProcessLookupError, TimeoutError):
+                        logger.warning("Timed out reaping Windows process tree rooted at %s.", proc.pid)
                 return
 
             # Cache pgid once to avoid PID-recycling race on repeated lookups.

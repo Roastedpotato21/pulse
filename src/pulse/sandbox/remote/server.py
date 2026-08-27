@@ -6,9 +6,12 @@ Exposes the RemoteWorker over an authenticated WebSocket protocol.
 from __future__ import annotations
 
 import asyncio
+import datetime
 import http
 import json
 import logging
+import sqlite3
+from pathlib import Path
 from typing import Any
 
 import websockets
@@ -22,47 +25,193 @@ from pulse.sandbox.remote.worker import RemoteWorker
 logger = logging.getLogger(__name__)
 
 
+def _append_log_entry(path: Path, entry: str) -> None:
+    """Append a stream entry off the event loop."""
+    with path.open("a", encoding="utf-8") as stream_log:
+        stream_log.write(entry)
+
+
+def _read_log_entries(path: Path) -> list[str]:
+    """Read complete historical stream entries off the event loop."""
+    with path.open("r", encoding="utf-8") as stream_log:
+        return [line.strip() for line in stream_log if line.strip()]
+
+
+class RemoteExecutionStore:
+    def __init__(self, db_path: Path):
+        self.db_path = db_path
+        self._ensure_schema()
+
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path, timeout=10.0)
+        conn.execute("PRAGMA journal_mode=WAL")
+        return conn
+
+    def _ensure_schema(self) -> None:
+        with self._connect() as conn:
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS executions (
+                    execution_id TEXT PRIMARY KEY,
+                    tenant_id TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    result_json TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+            """)
+
+    def create(self, execution_id: str, tenant_id: str) -> None:
+        now = datetime.datetime.now(datetime.UTC).isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO executions (execution_id, tenant_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+                (execution_id, tenant_id, "RUNNING", now, now),
+            )
+
+    def update(
+        self, execution_id: str, status: str, result_json: dict[str, Any] | None = None
+    ) -> None:
+        now = datetime.datetime.now(datetime.UTC).isoformat()
+        with self._connect() as conn:
+            if result_json:
+                conn.execute(
+                    "UPDATE executions SET status = ?, result_json = ?, updated_at = ? WHERE execution_id = ?",
+                    (status, json.dumps(result_json), now, execution_id),
+                )
+            else:
+                conn.execute(
+                    "UPDATE executions SET status = ?, updated_at = ? WHERE execution_id = ?",
+                    (status, now, execution_id),
+                )
+
+    def get(self, execution_id: str, tenant_id: str) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT status, result_json, created_at, updated_at FROM executions WHERE execution_id = ? AND tenant_id = ?",
+                (execution_id, tenant_id),
+            ).fetchone()
+            if not row:
+                return None
+            return {
+                "status": row[0],
+                "result": json.loads(row[1]) if row[1] else None,
+                "created_at": row[2],
+                "updated_at": row[3],
+            }
+
+    def cleanup_old(self, max_age_hours: int = 1) -> list[tuple[str, str]]:
+        threshold = (
+            datetime.datetime.now(datetime.UTC)
+            - datetime.timedelta(hours=max_age_hours)
+        ).isoformat()
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT execution_id, tenant_id FROM executions WHERE status IN ('COMPLETED', 'FAILED') AND updated_at < ?",
+                (threshold,),
+            ).fetchall()
+            for row in rows:
+                conn.execute("DELETE FROM executions WHERE execution_id = ?", (row[0],))
+            return rows
+
+    def mark_interrupted_running_unknown(self) -> int:
+        """Quarantine executions left RUNNING by a server restart.
+
+        A fresh server process has no proof that the old container completed
+        or that its side effects were not applied.  Reporting UNKNOWN makes
+        callers reconcile deliberately instead of replaying the command.
+        """
+        now = datetime.datetime.now(datetime.UTC).isoformat()
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "UPDATE executions SET status = 'UNKNOWN', updated_at = ? WHERE status = 'RUNNING'",
+                (now,),
+            )
+            return cursor.rowcount
+
+
 class RemoteServer:
     """Provides the network boundary for the remote worker."""
 
-    def __init__(self, host: str = "127.0.0.1", port: int = 8080, auth_token: str = "dev-token", max_concurrent_executions: int = 10) -> None:
+    def __init__(
+        self,
+        host: str = "127.0.0.1",
+        port: int = 8080,
+        auth_token: str | None = None,
+        max_concurrent_executions: int = 10,
+    ) -> None:
         self.host = host
         self.port = port
         # Support multiple tokens via comma-separated string if provided
-        self.valid_tokens = set(auth_token.split(",")) if auth_token else {"dev-token"}
+        if not auth_token:
+            raise ValueError(
+                "PULSE_REMOTE_TOKEN must be configured; insecure default tokens are disabled."
+            )
+        self.valid_tokens = set(auth_token.split(","))
         self.max_concurrent_executions = max_concurrent_executions
         self.worker = RemoteWorker()
+        self.store = RemoteExecutionStore(Path(".remote_sandbox.db"))
         self._active_executions: dict[str, asyncio.Task[Any]] = {}
         # Track tenant for each execution
         self._execution_tenants: dict[str, str] = {}
+        # Track attached clients per execution
+        self._attached_websockets: dict[
+            str, set[websockets.WebSocketServerProtocol]
+        ] = {}
+
+    async def _ttl_cleanup(self) -> None:
+        while True:
+            await asyncio.sleep(300)
+            try:
+                old = self.store.cleanup_old(max_age_hours=1)
+                for eid, tid in old:
+                    self.worker.cleanup_workspace(tid, eid)
+            except (OSError, RuntimeError) as e:
+                logger.error(f"TTL cleanup failed: {e}")
 
     async def _process_request(self, connection, request) -> Any | None:
         from websockets.http11 import Response
+
         """Enforce authenticated transport (R3)."""
         auth_header = request.headers.get("Authorization")
         if not auth_header or not auth_header.startswith("Bearer "):
-            return Response(http.HTTPStatus.UNAUTHORIZED, "Unauthorized", websockets.Headers(), b"Unauthorized")
-            
+            return Response(
+                http.HTTPStatus.UNAUTHORIZED,
+                "Unauthorized",
+                websockets.Headers(),
+                b"Unauthorized",
+            )
+
         token = auth_header.split(" ")[1]
         if token not in self.valid_tokens:
-            logger.warning(f"Unauthorized connection attempt. Token: {token}")
-            return Response(http.HTTPStatus.UNAUTHORIZED, "Unauthorized", websockets.Headers(), b"Unauthorized")
-            
+            logger.warning("Unauthorized remote sandbox connection attempt.")
+            return Response(
+                http.HTTPStatus.UNAUTHORIZED,
+                "Unauthorized",
+                websockets.Headers(),
+                b"Unauthorized",
+            )
+
         return None
 
     async def start(self) -> None:
         """Start the WebSocket server."""
         await self.worker.initialize()
-        
+        interrupted = self.store.mark_interrupted_running_unknown()
+        if interrupted:
+            logger.warning(
+                "Marked %s interrupted remote executions as UNKNOWN.", interrupted
+            )
+
         # Phase 3: TLS Enforcement
         import os
         import ssl
+
         ssl_context = None
-        
+
         tls_cert = os.environ.get("PULSE_TLS_CERT")
         tls_key = os.environ.get("PULSE_TLS_KEY")
         tls_ca = os.environ.get("PULSE_TLS_CA")
-        
+
         if tls_cert and tls_key and tls_ca:
             try:
                 ssl_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
@@ -78,225 +227,558 @@ class RemoteServer:
                 "mTLS certificates (PULSE_TLS_CERT, PULSE_TLS_KEY, PULSE_TLS_CA) "
                 "are strictly required for non-loopback connections."
             )
-                
+
+        asyncio.create_task(self._ttl_cleanup())
+
         async with websockets.serve(
-            self._handle_client, 
-            self.host, 
-            self.port, 
+            self._handle_client,
+            self.host,
+            self.port,
             process_request=self._process_request,
             ping_interval=20,
             ping_timeout=20,
-            max_size=1024 * 1024 * 50, # Enforce 50MB max payload size (R7)
-            ssl=ssl_context
+            max_size=1024 * 1024 * 50,  # Enforce 50MB max payload size (R7)
+            ssl=ssl_context,
         ):
             scheme = "wss" if ssl_context else "ws"
-            logger.info(f"Remote Sandbox Server listening on {scheme}://{self.host}:{self.port}")
+            logger.info(
+                f"Remote Sandbox Server listening on {scheme}://{self.host}:{self.port}"
+            )
             await asyncio.Future()  # run forever
 
-    async def _handle_client(self, websocket: websockets.WebSocketServerProtocol) -> None:
+    async def _handle_client(
+        self, websocket: websockets.WebSocketServerProtocol
+    ) -> None:
         """Handle incoming client WebSocket connections."""
-        
-        async def send_output(stream: str, data: bytes) -> None:
-            """Callback for streaming stdout/stderr (R4)."""
-            try:
-                await websocket.send(json.dumps({
-                    "type": "stream",
-                    "payload": {
-                        "stream": stream,
-                        "data": data.decode("utf-8", errors="replace")
-                    }
-                }))
-            except websockets.exceptions.ConnectionClosed:
-                pass
+
+        # Derive tenant_id from auth header
+        auth_header = websocket.request.headers.get("Authorization", "")
+        tenant_id = (
+            auth_header.split(" ")[1]
+            if auth_header.startswith("Bearer ")
+            else "unknown"
+        )
+        import hashlib
+
+        tenant_hash = hashlib.sha256(tenant_id.encode()).hexdigest()[:12]
 
         async def run_execution(req: SubmitExecutionRequest, tenant_id: str) -> None:
             """Background task for running the execution."""
-            try:
-                result = await self.worker.execute_request(req, tenant_id=tenant_id, output_callback=send_output)
+
+            async def scoped_send_output(stream: str, data: bytes) -> None:
+                log_entry = (
+                    json.dumps(
+                        {
+                            "type": "stream",
+                            "payload": {
+                                "execution_id": req.execution_id,
+                                "stream": stream,
+                                "data": data.decode("utf-8", errors="replace"),
+                            },
+                        }
+                    )
+                    + "\n"
+                )
+
+                log_file = (
+                    self.worker.workspace_base_path
+                    / tenant_id
+                    / req.execution_id
+                    / ".pulse_stream.log"
+                )
                 try:
-                    await websocket.send(json.dumps({
-                        "type": "result", 
-                        "payload": result.to_dict()
-                    }))
-                except websockets.exceptions.ConnectionClosed:
-                    pass
+                    if log_file.parent.exists():
+                        await asyncio.to_thread(_append_log_entry, log_file, log_entry)
+                except OSError:
+                    logger.warning(
+                        "Unable to persist remote stream for %s.", req.execution_id
+                    )
+
+                attached = self._attached_websockets.get(req.execution_id, set())
+                dead_ws = set()
+                for ws in attached:
+                    try:
+                        await ws.send(log_entry)
+                    except websockets.exceptions.ConnectionClosed:
+                        dead_ws.add(ws)
+                for ws in dead_ws:
+                    attached.discard(ws)
+
+            try:
+                self.store.create(req.execution_id, tenant_id)
+                result = await self.worker.execute_request(
+                    req, tenant_id=tenant_id, output_callback=scoped_send_output
+                )
+                self.store.update(req.execution_id, "COMPLETED", result.to_dict())
+
+                res_msg = json.dumps({"type": "result", "payload": result.to_dict()})
+                attached = self._attached_websockets.get(req.execution_id, set())
+                dead_ws = set()
+                for ws in attached:
+                    try:
+                        await ws.send(res_msg)
+                    except websockets.exceptions.ConnectionClosed:
+                        dead_ws.add(ws)
+                for ws in dead_ws:
+                    attached.discard(ws)
             except (OSError, RuntimeError) as e:
                 logger.error(f"Execution failed: {e}")
-                try:
-                    await websocket.send(json.dumps({
-                        "type": "error",
-                        "payload": f"Execution failed: {e}"
-                    }))
-                except websockets.exceptions.ConnectionClosed:
-                    pass
+                err_msg = f"Execution failed: {e}"
+                from pulse.sandbox.process import ProcessResult
+
+                fallback_res = ProcessResult(
+                    command=req.command,
+                    exit_code=-1,
+                    stdout="",
+                    stderr=err_msg,
+                    duration_ms=0,
+                    timed_out=False,
+                    truncated=False,
+                    pid=None,
+                    overlay_path=None,
+                    termination_reason="error",
+                )
+                self.store.update(req.execution_id, "FAILED", fallback_res.to_dict())
+
+                err_json = json.dumps(
+                    {"type": "result", "payload": fallback_res.to_dict()}
+                )
+                attached = self._attached_websockets.get(req.execution_id, set())
+                dead_ws = set()
+                for ws in attached:
+                    try:
+                        await ws.send(err_json)
+                    except websockets.exceptions.ConnectionClosed:
+                        dead_ws.add(ws)
+                for ws in dead_ws:
+                    attached.discard(ws)
             finally:
                 self._active_executions.pop(req.execution_id, None)
                 self._execution_tenants.pop(req.execution_id, None)
+                self._attached_websockets.pop(req.execution_id, None)
 
         client_executions: set[str] = set()
-        
-        # Derive tenant_id from auth header
-        auth_header = websocket.request.headers.get("Authorization", "")
-        tenant_id = auth_header.split(" ")[1] if auth_header.startswith("Bearer ") else "unknown"
-        import hashlib
-        tenant_hash = hashlib.sha256(tenant_id.encode()).hexdigest()[:12]
 
         try:
             async for message in websocket:
+                request_id: str | None = None
                 try:
                     data = json.loads(message)
                     action = data.get("action")
                     payload = data.get("payload", {})
-                    
+                    request_id = payload.get("request_id")
+
                     if action == "submit":
-                        if len(self._active_executions) >= self.max_concurrent_executions:
-                            logger.warning("Concurrency limit reached, rejecting execution.")
-                            await websocket.send(json.dumps({
-                                "type": "error",
-                                "payload": "Server is at maximum capacity, please try again later."
-                            }))
+                        if (
+                            len(self._active_executions)
+                            >= self.max_concurrent_executions
+                        ):
+                            logger.warning(
+                                "Concurrency limit reached, rejecting execution."
+                            )
+                            await websocket.send(
+                                json.dumps(
+                                    {
+                                        "type": "error",
+                                        "payload": {
+                                            "message": "Server is at maximum capacity, please try again later.",
+                                            "request_id": request_id,
+                                        },
+                                    }
+                                )
+                            )
                             continue
-                            
+
                         req = SubmitExecutionRequest.from_dict(payload)
                         # Acknowledge submission
-                        ack = SubmitExecutionResponse(execution_id=req.execution_id, status="STARTING")
-                        await websocket.send(json.dumps({"type": "response", "payload": ack.to_dict()}))
-                        
+                        ack = SubmitExecutionResponse(
+                            execution_id=req.execution_id, status="STARTING"
+                        )
+                        ack_payload = ack.to_dict() | {"request_id": request_id}
+                        await websocket.send(
+                            json.dumps({"type": "response", "payload": ack_payload})
+                        )
+
                         # Execute in background for streaming (R4)
                         task = asyncio.create_task(run_execution(req, tenant_hash))
                         self._active_executions[req.execution_id] = task
                         self._execution_tenants[req.execution_id] = tenant_hash
+                        if req.execution_id not in self._attached_websockets:
+                            self._attached_websockets[req.execution_id] = set()
+                        self._attached_websockets[req.execution_id].add(websocket)
                         client_executions.add(req.execution_id)
-                        
+
                     elif action == "cancel":
                         execution_id = payload.get("execution_id")
                         if execution_id:
                             # Cross-tenant prevention
                             if self._execution_tenants.get(execution_id) != tenant_hash:
-                                await websocket.send(json.dumps({"type": "error", "payload": "Unauthorized"}))
+                                await websocket.send(
+                                    json.dumps(
+                                        {"type": "error", "payload": "Unauthorized"}
+                                    )
+                                )
                                 continue
-                            
+
                             # Cancel the worker execution
                             await self.worker.cancel(execution_id)
                             # The task will complete or raise CancelledError
                             task = self._active_executions.get(execution_id)
                             if task and not task.done():
                                 task.cancel()
-                            
-                            await websocket.send(json.dumps({
-                                "type": "response", 
-                                "payload": {"status": "CANCELLED"}
-                            }))
-                            
+
+                            # Update store explicitly
+                            self.store.update(
+                                execution_id, "FAILED", {"error": "CANCELLED"}
+                            )
+
+                            await websocket.send(
+                                json.dumps(
+                                    {
+                                        "type": "response",
+                                        "payload": {
+                                            "status": "CANCELLED",
+                                            "request_id": request_id,
+                                        },
+                                    }
+                                )
+                            )
+
                     elif action == "upload_artifact":
                         import base64
                         import io
                         import tarfile
+
                         execution_id = payload.get("execution_id")
                         b64_data = payload.get("data")
                         if execution_id and b64_data:
                             try:
                                 data = base64.b64decode(b64_data)
-                                workspace = self.worker.workspace_base_path / tenant_hash / execution_id
+                                workspace = (
+                                    self.worker.workspace_base_path
+                                    / tenant_hash
+                                    / execution_id
+                                )
                                 workspace.mkdir(parents=True, exist_ok=True)
-                                with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
+                                with tarfile.open(
+                                    fileobj=io.BytesIO(data), mode="r:gz"
+                                ) as tar:
                                     import os
 
                                     from pulse.sandbox.errors import (
                                         SandboxSecurityError,
                                     )
+
                                     for member in tar.getmembers():
                                         if member.issym() or member.islnk():
-                                            raise SandboxSecurityError("Symlinks are not allowed in remote artifacts")
-                                        member_path = os.path.join(str(workspace), member.name)
-                                        if not os.path.abspath(member_path).startswith(os.path.abspath(str(workspace))):
-                                            raise SandboxSecurityError("Path traversal detected in upload_artifact")
+                                            raise SandboxSecurityError(
+                                                "Symlinks are not allowed in remote artifacts"
+                                            )
+                                        member_path = os.path.join(
+                                            str(workspace), member.name
+                                        )
+                                        if not os.path.abspath(member_path).startswith(
+                                            os.path.abspath(str(workspace))
+                                        ):
+                                            raise SandboxSecurityError(
+                                                "Path traversal detected in upload_artifact"
+                                            )
                                     # use data filter if available, else extractall (we checked manually above)
-                                    if hasattr(tarfile, 'data_filter'):
-                                        tar.extractall(path=workspace, filter='data')
+                                    if hasattr(tarfile, "data_filter"):
+                                        tar.extractall(path=workspace, filter="data")
                                     else:
                                         tar.extractall(path=workspace)
-                                await websocket.send(json.dumps({
-                                    "type": "response", 
-                                    "payload": {"status": "UPLOADED"}
-                                }))
+                                await websocket.send(
+                                    json.dumps(
+                                        {
+                                            "type": "response",
+                                            "payload": {
+                                                "status": "UPLOADED",
+                                                "request_id": request_id,
+                                            },
+                                        }
+                                    )
+                                )
                             except (OSError, ValueError, RuntimeError) as e:
                                 logger.error(f"Failed to extract artifact: {e}")
-                                await websocket.send(json.dumps({"type": "error", "payload": f"Upload failed: {e}"}))
-                    
+                                await websocket.send(
+                                    json.dumps(
+                                        {
+                                            "type": "error",
+                                            "payload": {
+                                                "message": f"Upload failed: {e}",
+                                                "request_id": request_id,
+                                            },
+                                        }
+                                    )
+                                )
+
                     elif action == "download_artifact":
                         import base64
                         import io
                         import tarfile
+
                         execution_id = payload.get("execution_id")
                         if execution_id:
+                            if not self.store.get(execution_id, tenant_hash):
+                                await websocket.send(
+                                    json.dumps(
+                                        {
+                                            "type": "error",
+                                            "payload": {
+                                                "message": "NOT_FOUND",
+                                                "request_id": request_id,
+                                            },
+                                        }
+                                    )
+                                )
+                                continue
                             overlay_path = self.worker.get_overlay_path(execution_id)
                             if not overlay_path or not overlay_path.exists():
-                                await websocket.send(json.dumps({
-                                    "type": "response", 
-                                    "payload": {"status": "NO_ARTIFACT"}
-                                }))
+                                await websocket.send(
+                                    json.dumps(
+                                        {
+                                            "type": "response",
+                                            "payload": {
+                                                "status": "NO_ARTIFACT",
+                                                "request_id": request_id,
+                                            },
+                                        }
+                                    )
+                                )
                             else:
                                 bio = io.BytesIO()
                                 with tarfile.open(fileobj=bio, mode="w:gz") as tar:
                                     for item in overlay_path.iterdir():
                                         tar.add(item, arcname=item.name)
-                                b64_out = base64.b64encode(bio.getvalue()).decode("ascii")
-                                await websocket.send(json.dumps({
-                                    "type": "response", 
-                                    "payload": {"status": "DOWNLOADED", "data": b64_out}
-                                }))
+                                b64_out = base64.b64encode(bio.getvalue()).decode(
+                                    "ascii"
+                                )
+                                await websocket.send(
+                                    json.dumps(
+                                        {
+                                            "type": "response",
+                                            "payload": {
+                                                "status": "DOWNLOADED",
+                                                "data": b64_out,
+                                                "request_id": request_id,
+                                            },
+                                        }
+                                    )
+                                )
                                 # Cleanup overlay after download
                                 self.worker.cleanup_overlay(execution_id)
-                                
+
                     elif action == "reconcile":
                         # Clean up orphaned workspaces not matching active executions for this tenant
                         orphans = 0
-                        tenant_workspace_path = self.worker.workspace_base_path / tenant_hash
+                        tenant_workspace_path = (
+                            self.worker.workspace_base_path / tenant_hash
+                        )
                         if tenant_workspace_path.exists():
                             for ws in tenant_workspace_path.iterdir():
-                                if ws.is_dir() and ws.name not in self._active_executions:
+                                if (
+                                    ws.is_dir()
+                                    and ws.name not in self._active_executions
+                                ):
                                     self.worker.cleanup_workspace(tenant_hash, ws.name)
                                     orphans += 1
-                        await websocket.send(json.dumps({
-                            "type": "response",
-                            "payload": {"status": "RECONCILED", "orphans_cleaned": orphans}
-                        }))
-                                
+                        await websocket.send(
+                            json.dumps(
+                                {
+                                    "type": "response",
+                                    "payload": {
+                                        "status": "RECONCILED",
+                                        "orphans_cleaned": orphans,
+                                        "request_id": request_id,
+                                    },
+                                }
+                            )
+                        )
+
+                    elif action == "status":
+                        execution_id = payload.get("execution_id")
+                        request_id = payload.get("request_id")
+                        state = self.store.get(execution_id, tenant_hash)
+                        if not state:
+                            await websocket.send(
+                                json.dumps(
+                                    {
+                                        "type": "response",
+                                        "payload": {
+                                            "status": "NOT_FOUND",
+                                            "request_id": request_id,
+                                        },
+                                    }
+                                )
+                            )
+                        elif (
+                            state["status"] in {"COMPLETED", "FAILED"}
+                            and state["result"]
+                        ):
+                            await websocket.send(
+                                json.dumps(
+                                    {
+                                        "type": "response",
+                                        "payload": {
+                                            "status": state["status"],
+                                            "request_id": request_id,
+                                        },
+                                    }
+                                )
+                            )
+
+                    elif action == "attach":
+                        execution_id = payload.get("execution_id")
+                        state = self.store.get(execution_id, tenant_hash)
+                        if not state:
+                            await websocket.send(
+                                json.dumps(
+                                    {
+                                        "type": "error",
+                                        "payload": {
+                                            "message": "NOT_FOUND",
+                                            "request_id": request_id,
+                                        },
+                                    }
+                                )
+                            )
+                            continue
+
+                        # Dump historical logs
+                        log_file = (
+                            self.worker.workspace_base_path
+                            / tenant_hash
+                            / execution_id
+                            / ".pulse_stream.log"
+                        )
+                        if log_file.exists():
+                            try:
+                                for line in await asyncio.to_thread(
+                                    _read_log_entries, log_file
+                                ):
+                                    await websocket.send(line)
+                            except OSError:
+                                logger.warning(
+                                    "Unable to read remote stream history for %s.",
+                                    execution_id,
+                                )
+
+                        if state["status"] == "RUNNING":
+                            if execution_id not in self._attached_websockets:
+                                self._attached_websockets[execution_id] = set()
+                            if (
+                                len(self._attached_websockets[execution_id]) > 0
+                                and websocket
+                                not in self._attached_websockets[execution_id]
+                            ):
+                                await websocket.send(
+                                    json.dumps(
+                                        {
+                                            "type": "error",
+                                            "payload": {
+                                                "message": "Another client is already attached",
+                                                "request_id": request_id,
+                                            },
+                                        }
+                                    )
+                                )
+                                continue
+
+                            self._attached_websockets[execution_id].add(websocket)
+                            client_executions.add(execution_id)
+                            await websocket.send(
+                                json.dumps(
+                                    {
+                                        "type": "response",
+                                        "payload": {
+                                            "status": "ATTACHED",
+                                            "request_id": request_id,
+                                        },
+                                    }
+                                )
+                            )
+                        elif (
+                            state["status"] in {"COMPLETED", "FAILED"}
+                            and state["result"]
+                        ):
+                            await websocket.send(
+                                json.dumps(
+                                    {
+                                        "type": "response",
+                                        "payload": {
+                                            "status": state["status"],
+                                            "request_id": request_id,
+                                        },
+                                    }
+                                )
+                            )
+                            await websocket.send(
+                                json.dumps(
+                                    {"type": "result", "payload": state["result"]}
+                                )
+                            )
+                        else:
+                            await websocket.send(
+                                json.dumps(
+                                    {
+                                        "type": "response",
+                                        "payload": {
+                                            "status": state["status"],
+                                            "request_id": request_id,
+                                        },
+                                    }
+                                )
+                            )
+
                     else:
-                        await websocket.send(json.dumps({
-                            "type": "error", 
-                            "payload": f"Unknown action: {action}"
-                        }))
-                        
+                        await websocket.send(
+                            json.dumps(
+                                {
+                                    "type": "error",
+                                    "payload": {
+                                        "message": f"Unknown action: {action}",
+                                        "request_id": request_id,
+                                    },
+                                }
+                            )
+                        )
+
                 except (KeyError, ValueError, OSError, RuntimeError) as e:
                     logger.error(f"Error processing message: {e}")
-                    await websocket.send(json.dumps({"type": "error", "payload": str(e)}))
+                    await websocket.send(
+                        json.dumps(
+                            {
+                                "type": "error",
+                                "payload": {
+                                    "message": str(e),
+                                    "request_id": request_id,
+                                },
+                            }
+                        )
+                    )
         except websockets.exceptions.ConnectionClosed:
             logger.info("Client disconnected.")
         finally:
-            # R5: Lifecycle + heartbeat + recovery (cleanup on disconnect)
+            # R5/GAP-07: Detach client but do NOT cancel execution
             for eid in client_executions:
-                task = self._active_executions.get(eid)
-                if task and not task.done():
-                    logger.info(f"Cancelling execution {eid} due to client disconnect.")
-                    task.cancel()
-                    # Also tell the worker to cancel
-                    asyncio.create_task(self.worker.cancel(eid))
-                self.worker.cleanup_workspace(tenant_hash, eid)
-                self._execution_tenants.pop(eid, None)
+                if eid in self._attached_websockets:
+                    self._attached_websockets[eid].discard(websocket)
+
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
     import os
+
     host = os.environ.get("PULSE_REMOTE_HOST", "127.0.0.1")
     port = int(os.environ.get("PULSE_REMOTE_PORT", "8080"))
-    token = os.environ.get("PULSE_REMOTE_TOKEN", "dev-token")
+    token = os.environ.get("PULSE_REMOTE_TOKEN")
     server = RemoteServer(host=host, port=port, auth_token=token)
     try:
         asyncio.run(server.start())
     except KeyboardInterrupt:
         logger.info("Server shutting down.")
+
 
 if __name__ == "__main__":
     main()

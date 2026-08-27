@@ -65,7 +65,12 @@ def test_lease_loss_cancels_worker(tmp_path: Path) -> None:
         # Force the in-memory lease to be expired
         task_obj = tm.get_task(t.id)
         task_obj.lease_expires_at = "2000-01-01T00:00:00+00:00"
-        tm.store.update_task(task_obj)
+        tm.store.update_task(
+            task_obj,
+            expected_status=TaskStatus.RUNNING,
+            expected_owner_id=tm.worker_id,
+            expected_lease_epoch=task_obj.lease_epoch,
+        )
         task_obj.version += 1
 
         # A second manager recovers the task
@@ -140,7 +145,12 @@ def test_stale_worker_cannot_continue_after_recovery(tmp_path: Path) -> None:
         tm_a._stop_heartbeat(t.id)
         task_obj = tm_a.get_task(t.id)
         task_obj.lease_expires_at = "2000-01-01T00:00:00+00:00"
-        tm_a.store.update_task(task_obj)
+        tm_a.store.update_task(
+            task_obj,
+            expected_status=TaskStatus.RUNNING,
+            expected_owner_id=tm_a.worker_id,
+            expected_lease_epoch=task_obj.lease_epoch,
+        )
         task_obj.version += 1
 
         # Worker B recovers
@@ -355,7 +365,12 @@ def test_completion_lease_loss_race(tmp_path: Path) -> None:
         # Expire the lease
         task_obj = tm.get_task(t.id)
         task_obj.lease_expires_at = "2000-01-01T00:00:00+00:00"
-        tm.store.update_task(task_obj)
+        tm.store.update_task(
+            task_obj,
+            expected_status=TaskStatus.RUNNING,
+            expected_owner_id=tm.worker_id,
+            expected_lease_epoch=task_obj.lease_epoch,
+        )
         task_obj.version += 1
 
         # Second manager recovers and acquires
@@ -428,7 +443,12 @@ def test_worker_that_ignores_cancellation_is_fenced(tmp_path: Path) -> None:
         # Fence the old epoch through normal recovery.
         current = owner.get_task(task.id)
         current.lease_expires_at = "2000-01-01T00:00:00+00:00"
-        owner.store.update_task(current)
+        owner.store.update_task(
+            current,
+            expected_status=TaskStatus.RUNNING,
+            expected_owner_id=owner.worker_id,
+            expected_lease_epoch=current.lease_epoch,
+        )
         current.version += 1
         recovered = TaskManager(workspace, store=TaskStore(workspace))
         await recovered.recover_tasks()

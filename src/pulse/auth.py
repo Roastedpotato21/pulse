@@ -172,7 +172,11 @@ class SecureTokenStore:
             try:
                 keyring.set_password(KEYRING_SERVICE_NAME, KEYRING_ACCOUNT_NAME, payload)
                 stored_in_keyring = True
-            except (OSError, RuntimeError, TypeError, ValueError, keyring.errors.KeyringError) as err:
+            # Platform keyring adapters may surface native credential-manager
+            # exceptions that are not subclasses of KeyringError (notably
+            # WinError 1312 in non-interactive Windows sessions).  The
+            # workspace fallback is the supported recovery path.
+            except Exception as err:  # noqa: BLE001
                 logger.debug(f"Keyring store unavailable: {err}")
                 stored_in_keyring = False
 
@@ -197,7 +201,7 @@ class SecureTokenStore:
         if keyring is not None:
             try:
                 raw_payload = keyring.get_password(KEYRING_SERVICE_NAME, KEYRING_ACCOUNT_NAME)
-            except (OSError, RuntimeError, TypeError, ValueError, keyring.errors.KeyringError) as err:
+            except Exception as err:  # noqa: BLE001
                 logger.debug(f"Keyring load unavailable: {err}")
                 raw_payload = None
 
@@ -225,7 +229,7 @@ class SecureTokenStore:
         if keyring is not None:
             try:
                 keyring.delete_password(KEYRING_SERVICE_NAME, KEYRING_ACCOUNT_NAME)
-            except (OSError, RuntimeError, TypeError, ValueError, keyring.errors.KeyringError) as err:
+            except Exception as err:  # noqa: BLE001
                 logger.debug(f"Keyring clear ignored: {err}")
 
         if self.fallback_file.exists():
@@ -640,20 +644,20 @@ class AuthenticationManager:
 # --- Top-Level Standalone Functions (Delegating to AuthenticationManager) ---
 
 def is_authenticated() -> bool:
-    return AuthenticationManager(Path.cwd()).is_authenticated()
+    return AuthenticationManager(_token_store.workspace).is_authenticated()
 
 
 def get_current_user() -> UserProfile | None:
-    return AuthenticationManager(Path.cwd()).get_current_user()
+    return AuthenticationManager(_token_store.workspace).get_current_user()
 
 
 def logout() -> bool:
-    AuthenticationManager(Path.cwd()).logout()
+    AuthenticationManager(_token_store.workspace).logout()
     return True
 
 
 def refresh_session() -> bool:
-    return AuthenticationManager(Path.cwd()).refresh_google_token()
+    return AuthenticationManager(_token_store.workspace).refresh_google_token()
 
 
 def login(timeout_seconds: int = 120) -> UserProfile | None:

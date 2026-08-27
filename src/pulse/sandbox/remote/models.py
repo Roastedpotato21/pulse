@@ -17,7 +17,7 @@ class SubmitExecutionRequest:
     resource_policy_dict: dict[str, Any] | None = None
     network_policy_dict: dict[str, Any] | None = None
     secret_policy_dict: dict[str, Any] | None = None
-    
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "protocol_version": self.protocol_version,
@@ -30,7 +30,7 @@ class SubmitExecutionRequest:
             "network_policy_dict": self.network_policy_dict,
             "secret_policy_dict": self.secret_policy_dict,
         }
-        
+
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> SubmitExecutionRequest:
         return cls(
@@ -51,14 +51,14 @@ class SubmitExecutionResponse:
     execution_id: str
     status: str
     error: str | None = None
-    
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "execution_id": self.execution_id,
             "status": self.status,
             "error": self.error,
         }
-        
+
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> SubmitExecutionResponse:
         return cls(
@@ -79,7 +79,7 @@ class ExecutionResultModel:
     timed_out: bool = False
     truncated: bool = False
     termination_reason: str | None = None
-    
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "execution_id": self.execution_id,
@@ -92,7 +92,7 @@ class ExecutionResultModel:
             "truncated": self.truncated,
             "termination_reason": self.termination_reason,
         }
-        
+
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ExecutionResultModel:
         return cls(

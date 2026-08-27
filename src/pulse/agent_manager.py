@@ -294,18 +294,6 @@ class AgentManager:
             for task in ready_tasks:
                 agent = self._select_agent_for_task(task)
                 
-                async def run_agent(t: Task, a: CollaborationAgent) -> None:
-                    try:
-                        await self.task_manager.start_task(t.id)
-                        
-                        # We yield from the async generator and collect
-                        # But wait, we can't yield from inside asyncio.gather directly.
-                        # Instead we will process events and yield them from the main loop.
-                        # For now, we will collect events in a queue and yield them.
-                    except Exception as e:
-                        await self.task_manager.fail_task(t.id, str(e))
-                        raise
-                
                 tasks_to_run.append((task, agent))
 
             # Since we need to yield StreamEvents, we can run them concurrently and merge the streams.
