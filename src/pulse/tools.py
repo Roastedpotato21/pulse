@@ -14,12 +14,15 @@ from pulse.memory import LongTermMemory
 from pulse.mutations import MutationTracker
 from pulse.provider import ModelProvider
 from pulse.repository import RepositoryIndex
+from pulse.tool_policy import ArgumentKind, ToolArgument, ToolRisk, ToolSchema
 from pulse.tool_registry import ToolInvocation, ToolResult
 from pulse.verification import VerificationEngine
 
 
 class BaseTool:
     requires_permission = False
+    risk = ToolRisk.LOW
+    schema: ToolSchema | None = None
 
     def matches(self, invocation: ToolInvocation) -> bool:
         return invocation.name == self.name
@@ -28,6 +31,7 @@ class BaseTool:
 class StatusTool(BaseTool):
     name = "status"
     description = "Show the active Pulse configuration."
+    schema = ToolSchema()
 
     def __init__(self, config: AgentConfig, provider: ModelProvider) -> None:
         self.config, self.provider = config, provider
@@ -45,6 +49,7 @@ class StatusTool(BaseTool):
 class DoctorTool(BaseTool):
     name = "doctor"
     description = "Check local Pulse configuration and provider readiness."
+    schema = ToolSchema()
 
     def __init__(self, workspace: Path, config: AgentConfig, provider: ModelProvider) -> None:
         self.workspace, self.config, self.provider = workspace, config, provider
@@ -62,6 +67,7 @@ class DoctorTool(BaseTool):
 class MutationsTool(BaseTool):
     name = "mutations"
     description = "Show tracked workspace mutations."
+    schema = ToolSchema((ToolArgument("last", ArgumentKind.BOOLEAN),))
 
     def __init__(self, mutations: MutationTracker) -> None:
         self.mutations = mutations
@@ -79,6 +85,15 @@ class MutationsTool(BaseTool):
 class EditTool(BaseTool):
     name = "edit"
     description = "Show a proposed file diff and apply it only after approval."
+    risk = ToolRisk.HIGH
+    schema = ToolSchema(
+        (
+            ToolArgument("file", ArgumentKind.STRING, required=True),
+            ToolArgument("content", ArgumentKind.STRING, required=True),
+            ToolArgument("reason", ArgumentKind.STRING),
+            ToolArgument("approve", ArgumentKind.CALLABLE, required=True),
+        )
+    )
 
     def __init__(self, edits: EditWorkflow, git: GitIntelligence | None = None) -> None:
         self.edits, self.git = edits, git
@@ -107,6 +122,8 @@ class RollbackTool(BaseTool):
     name = "rollback"
     description = "Restore the last approved edit from its tracked snapshot."
     requires_permission = True
+    risk = ToolRisk.HIGH
+    schema = ToolSchema()
 
     def __init__(self, edits: EditWorkflow) -> None:
         self.edits = edits
@@ -119,6 +136,13 @@ class RollbackTool(BaseTool):
 class VerifyTool(BaseTool):
     name = "verify"
     description = "Detect and run the project's test suite."
+    risk = ToolRisk.MEDIUM
+    schema = ToolSchema(
+        (
+            ToolArgument("query", ArgumentKind.STRING),
+            ToolArgument("request", ArgumentKind.STRING),
+        )
+    )
 
     def __init__(self, verification: VerificationEngine) -> None:
         self.verification = verification
@@ -138,6 +162,7 @@ class VerifyTool(BaseTool):
 class GitTool(BaseTool):
     name = "git"
     description = "Show Git branch, status, diff summary, and a commit suggestion."
+    schema = ToolSchema()
 
     def __init__(self, git: GitIntelligence) -> None:
         self.git = git
@@ -159,6 +184,14 @@ class GitTool(BaseTool):
 class MemoryTool(BaseTool):
     name = "memory"
     description = "Store preferences and inspect long-term project memory."
+    risk = ToolRisk.MEDIUM
+    schema = ToolSchema(
+        (
+            ToolArgument("preference_key", ArgumentKind.STRING),
+            ToolArgument("preference_value", ArgumentKind.STRING),
+            ToolArgument("query", ArgumentKind.STRING),
+        )
+    )
 
     def __init__(self, memory: LongTermMemory) -> None:
         self.memory = memory
@@ -179,6 +212,7 @@ class MemoryTool(BaseTool):
 class IndexTool(BaseTool):
     name = "index"
     description = "Incrementally index repository files, folders, imports, and symbols."
+    schema = ToolSchema()
 
     def __init__(self, repository: RepositoryIndex) -> None:
         self.repository = repository
@@ -194,6 +228,7 @@ class IndexTool(BaseTool):
 class SearchTool(BaseTool):
     name = "search"
     description = "Find repository files by filename and semantic terms."
+    schema = ToolSchema((ToolArgument("query", ArgumentKind.STRING, required=True),))
 
     def __init__(self, repository: RepositoryIndex) -> None:
         self.repository = repository
@@ -207,6 +242,7 @@ class SearchTool(BaseTool):
 class SymbolsTool(BaseTool):
     name = "symbols"
     description = "List imports, classes, and functions from one indexed file."
+    schema = ToolSchema((ToolArgument("file", ArgumentKind.STRING, required=True),))
 
     def __init__(self, repository: RepositoryIndex) -> None:
         self.repository = repository
@@ -224,6 +260,15 @@ class SymbolsTool(BaseTool):
 class TaskTool(BaseTool):
     name = "task"
     description = "Manage tasks: create, list, inspect, resume, or cancel tasks."
+    risk = ToolRisk.MEDIUM
+    schema = ToolSchema(
+        (
+            ToolArgument("id", ArgumentKind.STRING),
+            ToolArgument("action", ArgumentKind.STRING),
+            ToolArgument("status", ArgumentKind.STRING),
+            ToolArgument("reason", ArgumentKind.STRING),
+        )
+    )
 
     def __init__(self, task_manager: Any) -> None:
         self.task_manager = task_manager
@@ -288,6 +333,8 @@ class TaskTool(BaseTool):
 class SessionTool(BaseTool):
     name = "session"
     description = "Manage sessions: list, inspect, resume, or archive sessions."
+    risk = ToolRisk.MEDIUM
+    schema = ToolSchema((ToolArgument("id", ArgumentKind.STRING),))
 
     def __init__(self, session_manager: Any) -> None:
         self.session_manager = session_manager

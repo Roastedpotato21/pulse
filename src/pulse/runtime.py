@@ -31,6 +31,7 @@ from pulse.session_manager import SessionManager
 from pulse.software_engineer import AutonomousSoftwareEngineer
 from pulse.streaming import StreamingExecutionEngine
 from pulse.task_manager import TaskManager
+from pulse.tool_policy import ToolPolicyEngine
 from pulse.tool_registry import ToolInvocation, ToolRegistry
 from pulse.tools import (
     DoctorTool,
@@ -101,17 +102,24 @@ def build_runtime(workspace: Path, config: AgentConfig | None = None) -> AgentRu
             "run tool", getattr(tool, "name", "tool"), "This action changes the project."
         )
 
+    tool_capabilities = frozenset(
+        {
+            "status", "doctor", "mutations", "edit", "rollback", "git", "memory",
+            "index", "search", "symbols", "verify", "task", "tasks", "resume", "cancel",
+            "session", "sessions", "resume-session",
+        }
+    )
     tools = ToolRegistry(
         [
-            StatusTool(resolved_config, provider),
-            DoctorTool(resolved_workspace, resolved_config, provider),
-            MutationsTool(mutations),
-            EditTool(edits, git),
-            RollbackTool(edits),
-            GitTool(git),
-            MemoryTool(memory),
+            StatusTool(resolved_config, provider), DoctorTool(resolved_workspace, resolved_config, provider),
+            MutationsTool(mutations), EditTool(edits, git), RollbackTool(edits), GitTool(git), MemoryTool(memory),
         ],
         permission_checker=check_permission,
+        policy_engine=ToolPolicyEngine(
+            workspace=resolved_workspace,
+            allowed_capabilities=tool_capabilities,
+            audit_log=audit,
+        ),
     )
     tools.register(IndexTool(repository))
     tools.register(SearchTool(repository))
