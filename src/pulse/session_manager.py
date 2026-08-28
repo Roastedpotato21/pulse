@@ -10,6 +10,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import shutil
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, field
@@ -19,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+SESSION_SCHEMA_VERSION = 1
 
 
 # ---------------------------------------------------------------------------
@@ -72,6 +75,7 @@ class Session:
     def to_dict(self) -> dict[str, Any]:
         """Serialize Session object to JSON-compatible dictionary."""
         return {
+            "schema_version": SESSION_SCHEMA_VERSION,
             "id": self.id,
             "title": self.title,
             "status": self.status.value,
@@ -86,6 +90,11 @@ class Session:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Session:
         """Deserialize Session object from dictionary."""
+        version = int(data.get("schema_version", 0))
+        if version > SESSION_SCHEMA_VERSION:
+            raise ValueError(
+                f"Session schema v{version} is newer than supported v{SESSION_SCHEMA_VERSION}."
+            )
         status = SessionStatus(data.get("status", "ACTIVE"))
         conversation = [
             SessionTurn(**t) for t in data.get("conversation", []) if isinstance(t, dict)
@@ -123,12 +132,20 @@ class SessionStore:
 
     def save(self, session: Session) -> None:
         """Persist a session to its JSON file."""
+        temporary_path: Path | None = None
         try:
             file_path = self._get_file_path(session.id)
-            with file_path.open("w", encoding="utf-8") as f:
+            temporary_path = file_path.with_name(f".{file_path.name}.{uuid.uuid4().hex}.tmp")
+            with temporary_path.open("w", encoding="utf-8") as f:
                 json.dump(session.to_dict(), f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temporary_path, file_path)
         except OSError as err:
             logger.error(f"Failed to persist session {session.id}: {err}")
+        finally:
+            if temporary_path:
+                temporary_path.unlink(missing_ok=True)
 
     def load(self, session_id: str) -> Session | None:
         """Load a session from its JSON file."""
@@ -138,8 +155,15 @@ class SessionStore:
         try:
             with file_path.open("r", encoding="utf-8") as f:
                 data = json.load(f)
-            return Session.from_dict(data)
-        except (OSError, json.JSONDecodeError) as err:
+            version = int(data.get("schema_version", 0))
+            session = Session.from_dict(data)
+            if version < SESSION_SCHEMA_VERSION:
+                backup = file_path.with_suffix(f".json.schema-v{version}.bak")
+                if not backup.exists():
+                    shutil.copy2(file_path, backup)
+                self.save(session)
+            return session
+        except (OSError, ValueError, json.JSONDecodeError) as err:
             logger.error(f"Failed to load session {session_id}: {err}")
             return None
 
@@ -147,12 +171,9 @@ class SessionStore:
         """List all available sessions."""
         sessions = []
         for file_path in self.store_dir.glob("*.json"):
-            try:
-                with file_path.open("r", encoding="utf-8") as f:
-                    data = json.load(f)
-                sessions.append(Session.from_dict(data))
-            except (OSError, json.JSONDecodeError) as err:
-                logger.warning(f"Skipping unreadable session file {file_path}: {err}")
+            session = self.load(file_path.stem)
+            if session:
+                sessions.append(session)
         return sorted(sessions, key=lambda s: s.updated_at, reverse=True)
 
     def set_active_session_id(self, session_id: str) -> None:

@@ -5,7 +5,7 @@ import json
 import subprocess
 import uuid
 from collections.abc import Iterator
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from difflib import unified_diff
 from pathlib import Path
@@ -25,6 +25,7 @@ class FileSnapshot:
 class MutationEvent:
     """An immutable, rollback-ready record of one workspace file mutation."""
 
+    schema_version: int = field(default=1, init=False)
     transaction_id: str
     correlation_id: str
     timestamp: str

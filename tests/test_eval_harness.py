@@ -77,7 +77,8 @@ def test_trajectory_logger_roundtrip(tmp_path: Path):
     # Ensure file exists and content is valid JSON
     assert out_path.is_file()
     raw = json.loads(out_path.read_text(encoding="utf-8"))
-    assert isinstance(raw, list) and len(raw) == 2
+    assert raw["schema_version"] == 1
+    assert len(raw["steps"]) == 2
     # Load back and compare objects
     loaded_steps = logger.load()
     assert len(loaded_steps) == 2
@@ -86,4 +87,4 @@ def test_trajectory_logger_roundtrip(tmp_path: Path):
     assert first.prompt == "first"
     assert second.result == "ok"
     # Ensure the loaded steps match the original dump content
-    assert [asdict(s) for s in loaded_steps] == raw
+    assert [asdict(s) for s in loaded_steps] == raw["steps"]

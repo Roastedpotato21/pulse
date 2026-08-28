@@ -16,6 +16,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from pulse.storage import migrate_database
+
+CONVERSATION_SCHEMA_VERSION = 1
+
 # ---------------------------------------------------------------------------
 # Data models
 # ---------------------------------------------------------------------------
@@ -66,29 +70,27 @@ class ConversationManager:
         return conn
 
     def _ensure_schema(self) -> None:
-        with self._connect() as conn:
-            conn.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS conversations (
+        def migration(conn: sqlite3.Connection, _current: int) -> None:
+            conn.execute("""CREATE TABLE IF NOT EXISTS conversations (
                     id         TEXT PRIMARY KEY,
                     title      TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS turns (
+                )""")
+            conn.execute("""CREATE TABLE IF NOT EXISTS turns (
                     id         INTEGER PRIMARY KEY AUTOINCREMENT,
                     conv_id    TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
                     role       TEXT NOT NULL,
                     content    TEXT NOT NULL,
                     created_at TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS meta (
+                )""")
+            conn.execute("""CREATE TABLE IF NOT EXISTS meta (
                     key   TEXT PRIMARY KEY,
                     value TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS turns_conv_idx ON turns(conv_id);
-                """
-            )
+                )""")
+            conn.execute("CREATE INDEX IF NOT EXISTS turns_conv_idx ON turns(conv_id)")
+
+        migrate_database(self.database_path, CONVERSATION_SCHEMA_VERSION, migration)
 
     # ------------------------------------------------------------------
     # Conversation CRUD

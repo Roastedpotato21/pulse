@@ -27,6 +27,9 @@ from pulse.sandbox.remote.models import (
     SubmitExecutionResponse,
 )
 from pulse.sandbox.remote.worker import RemoteWorker
+from pulse.storage import migrate_database
+
+REMOTE_EXECUTION_SCHEMA_VERSION = 2
 
 logger = logging.getLogger(__name__)
 
@@ -55,9 +58,8 @@ class RemoteExecutionStore:
         return conn
 
     def _ensure_schema(self) -> None:
-        with self._connect() as conn:
-            conn.executescript("""
-                CREATE TABLE IF NOT EXISTS executions (
+        def migration(conn: sqlite3.Connection, _current: int) -> None:
+            conn.execute("""CREATE TABLE IF NOT EXISTS executions (
                     execution_id TEXT PRIMARY KEY,
                     tenant_id TEXT NOT NULL,
                     status TEXT NOT NULL,
@@ -65,14 +67,14 @@ class RemoteExecutionStore:
                     result_json TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
-                );
-            """)
+                )""")
             columns = {
                 row[1] for row in conn.execute("PRAGMA table_info(executions)").fetchall()
             }
             if "correlation_id" not in columns:
                 conn.execute("ALTER TABLE executions ADD COLUMN correlation_id TEXT")
-            conn.execute("PRAGMA user_version = 2")
+
+        migrate_database(self.db_path, REMOTE_EXECUTION_SCHEMA_VERSION, migration)
 
     def create(
         self,
@@ -83,7 +85,8 @@ class RemoteExecutionStore:
         now = datetime.datetime.now(datetime.UTC).isoformat()
         with self._connect() as conn:
             conn.execute(
-                "INSERT OR REPLACE INTO executions (execution_id, tenant_id, status, correlation_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO executions (execution_id, tenant_id, status, correlation_id, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(execution_id) DO NOTHING",
                 (execution_id, tenant_id, "RUNNING", correlation_id, now, now),
             )
 

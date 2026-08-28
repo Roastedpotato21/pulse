@@ -20,7 +20,10 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, ClassVar
 
+from pulse.storage import migrate_database
 from pulse.telemetry import get_correlation_id
+
+TASK_SCHEMA_VERSION = 3
 
 logger = logging.getLogger(__name__)
 
@@ -285,10 +288,8 @@ class TaskStore:
         return conn
 
     def _ensure_schema(self) -> None:
-        with self._connect() as conn:
-            conn.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS tasks (
+        def migration(conn: sqlite3.Connection, _current: int) -> None:
+            conn.execute("""CREATE TABLE IF NOT EXISTS tasks (
                     id TEXT PRIMARY KEY,
                     title TEXT NOT NULL,
                     goal TEXT NOT NULL,
@@ -312,9 +313,24 @@ class TaskStore:
                     owner_pid INTEGER,
                     remote_execution_id TEXT,
                     next_retry_at TEXT
-                );
-                CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
-                CREATE TABLE IF NOT EXISTS task_outbox_events (
+                )""")
+            columns = {
+                row[1] for row in conn.execute("PRAGMA table_info(tasks)").fetchall()
+            }
+            additions = {
+                "version": "INTEGER NOT NULL DEFAULT 1",
+                "owner_id": "TEXT",
+                "lease_expires_at": "TEXT",
+                "lease_epoch": "INTEGER NOT NULL DEFAULT 0",
+                "owner_pid": "INTEGER",
+                "remote_execution_id": "TEXT",
+                "next_retry_at": "TEXT",
+            }
+            for name, declaration in additions.items():
+                if name not in columns:
+                    conn.execute(f"ALTER TABLE tasks ADD COLUMN {name} {declaration}")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status)")
+            conn.execute("""CREATE TABLE IF NOT EXISTS task_outbox_events (
                     event_id TEXT PRIMARY KEY,
                     task_id TEXT NOT NULL,
                     sequence INTEGER NOT NULL,
@@ -324,32 +340,13 @@ class TaskStore:
                     delivered_at TEXT,
                     UNIQUE(task_id, sequence),
                     FOREIGN KEY(task_id) REFERENCES tasks(id)
-                );
-                CREATE INDEX IF NOT EXISTS idx_task_outbox_pending
-                    ON task_outbox_events(delivered_at, created_at);
-                """
+                )""")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_task_outbox_pending "
+                "ON task_outbox_events(delivered_at, created_at)"
             )
-            # Safe schema migration for OCC
-            cursor = conn.execute("PRAGMA table_info(tasks)")
-            columns = [row[1] for row in cursor.fetchall()]
-            if "version" not in columns:
-                conn.execute(
-                    "ALTER TABLE tasks ADD COLUMN version INTEGER NOT NULL DEFAULT 1"
-                )
-            if "owner_id" not in columns:
-                conn.execute("ALTER TABLE tasks ADD COLUMN owner_id TEXT")
-            if "lease_expires_at" not in columns:
-                conn.execute("ALTER TABLE tasks ADD COLUMN lease_expires_at TEXT")
-            if "lease_epoch" not in columns:
-                conn.execute(
-                    "ALTER TABLE tasks ADD COLUMN lease_epoch INTEGER NOT NULL DEFAULT 0"
-                )
-            if "owner_pid" not in columns:
-                conn.execute("ALTER TABLE tasks ADD COLUMN owner_pid INTEGER")
-            if "remote_execution_id" not in columns:
-                conn.execute("ALTER TABLE tasks ADD COLUMN remote_execution_id TEXT")
-            if "next_retry_at" not in columns:
-                conn.execute("ALTER TABLE tasks ADD COLUMN next_retry_at TEXT")
+
+        migrate_database(self.store_file, TASK_SCHEMA_VERSION, migration)
 
     def _migrate_legacy_json(self) -> None:
         legacy_file = self.store_dir / "tasks.json"

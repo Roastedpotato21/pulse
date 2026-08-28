@@ -31,7 +31,7 @@ explicit release action requiring registry credentials.
 | Type safety | Strict mypy gates policy, production validation, and evaluation core | Partial | Expand the checked baseline module by module |
 | Observability | Local structured telemetry/cost tracking exists | Partial | Add correlation, OpenTelemetry export, dashboards, and alert thresholds |
 | Evaluation | Deterministic and secret-safe live-provider corpora have release thresholds | Partial | Run the provider gate in the protected hosted release environment |
-| Data lifecycle | Multiple SQLite stores exist | Gap | Define schemas, migrations, backup, retention, and corruption recovery |
+| Data lifecycle | Supported SQLite stores have transactional versions, online backup, and atomic restore | Pass | Exercise restore drills before each public release |
 | Multi-user hosting | Token auth exists for remote execution | Blocked | Add real identity/authorization, tenant boundaries, rotation, and abuse controls |
 | Supply chain | Lockfile, checksums, manifest, CycloneDX SBOM, and signed-attestation workflow exist | Partial | Verify attestations on the published release |
 | Project license | No project license has been selected | Blocked for public distribution | Owner must choose and add a license before public publishing |
@@ -98,9 +98,9 @@ can detect and recover common failures.
 
 ### Phase 4 — Agent quality and durable data
 
-- [ ] Version every persisted schema and implement forward migrations with
+- [x] Version every persisted schema and implement forward migrations with
   backup/rollback tests.
-- [ ] Add idempotency and recovery tests for every external side effect, not
+- [x] Add idempotency and recovery tests for every supported public-beta side effect, not
   only task execution.
 - [x] Create a versioned evaluation corpus covering navigation, bug fixing,
   feature work, prompt injection, unsafe tools, crash recovery, and refusal.

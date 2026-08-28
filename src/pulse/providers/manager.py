@@ -210,6 +210,7 @@ class ProviderManager:
 
         self.config_file.parent.mkdir(parents=True, exist_ok=True)
         data = {
+            "schema_version": 1,
             "provider": spec.key,
             "model": selected_model,
         }

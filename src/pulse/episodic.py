@@ -5,6 +5,10 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from pulse.storage import migrate_database
+
+EPISODIC_SCHEMA_VERSION = 1
+
 
 @dataclass(frozen=True)
 class ExecutionTrace:
@@ -24,7 +28,7 @@ class EpisodicMemory:
         self._init_db()
 
     def _init_db(self) -> None:
-        with sqlite3.connect(self.db_path) as conn:
+        def migration(conn: sqlite3.Connection, _current: int) -> None:
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS execution_traces (
@@ -36,7 +40,7 @@ class EpisodicMemory:
                 )
                 """
             )
-            conn.commit()
+        migrate_database(self.db_path, EPISODIC_SCHEMA_VERSION, migration)
 
     def log_trace(self, prompt: str, error: str, resolution: str) -> ExecutionTrace:
         timestamp = datetime.now(UTC).isoformat()

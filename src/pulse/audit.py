@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -10,6 +10,7 @@ from pulse.telemetry import get_correlation_id
 
 @dataclass(frozen=True)
 class AuditEntry:
+    schema_version: int = field(default=1, init=False)
     timestamp: str
     correlation_id: str
     action: str

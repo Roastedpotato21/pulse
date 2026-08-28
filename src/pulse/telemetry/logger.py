@@ -5,7 +5,7 @@ import json
 import re
 import uuid
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -43,6 +43,7 @@ def correlation_scope(value: object | None = None):
 
 @dataclass
 class MetricEvent:
+    schema_version: int = field(default=1, init=False)
     timestamp: str
     correlation_id: str
     event_type: str

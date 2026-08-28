@@ -10,6 +10,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
+from pulse.storage import migrate_database
+
+MEMORY_SCHEMA_VERSION = 1
+
 
 @dataclass(frozen=True, slots=True)
 class MemoryEntry:
@@ -31,6 +35,16 @@ class LongTermMemory:
         self.workspace = workspace.resolve()
         self.database_path = database_path or self.workspace / ".agent" / "pulse-memory.sqlite3"
         self._lock = asyncio.Lock()
+        migrate_database(self.database_path, MEMORY_SCHEMA_VERSION, self._migrate_schema)
+
+    @staticmethod
+    def _migrate_schema(connection: sqlite3.Connection, _current: int) -> None:
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS memories (id INTEGER PRIMARY KEY, category TEXT NOT NULL, content TEXT NOT NULL, tags TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+        )
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS preferences (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+        )
 
     async def store_project_context(self, content: str, *, tags: tuple[str, ...] = ()) -> MemoryEntry:
         return await self._store("project", content, tags)
@@ -98,12 +112,6 @@ class LongTermMemory:
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(self.database_path)
         connection.execute("PRAGMA journal_mode=WAL")
-        connection.execute(
-            "CREATE TABLE IF NOT EXISTS memories (id INTEGER PRIMARY KEY, category TEXT NOT NULL, content TEXT NOT NULL, tags TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"
-        )
-        connection.execute(
-            "CREATE TABLE IF NOT EXISTS preferences (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"
-        )
         return connection
 
     def _store_sync(self, category: str, content: str, tags: tuple[str, ...]) -> MemoryEntry:

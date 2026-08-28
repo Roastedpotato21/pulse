@@ -63,16 +63,22 @@ to the public internet.
 | Remote execution store | `PULSE_REMOTE_DB` | Durable volume and periodic SQLite backup |
 | Remote tenant workspaces | `PULSE_REMOTE_WORKSPACE_ROOT` | Ephemeral; do not treat as the source of record |
 
-Never copy a live SQLite database file without coordinating its WAL. Prefer
-the SQLite online backup command:
+Never copy a live SQLite database file without coordinating its WAL. Use the
+bundled online backup operation:
 
 ```text
-sqlite3 SOURCE.sqlite3 ".backup 'BACKUP.sqlite3'"
+python -m pulse.storage backup SOURCE.sqlite3 BACKUP.sqlite3
 ```
 
 Verify backups with `PRAGMA integrity_check;`, encrypt them, and test restore
-on a separate path. Pulse does not yet provide a unified backup command, so
-operators own scheduling and retention.
+on a separate path. Pulse validates every backup before returning. With all
+Pulse processes stopped, restore using:
+
+```text
+python -m pulse.storage restore BACKUP.sqlite3 SOURCE.sqlite3 --confirm-stopped
+```
+
+Operators still own scheduling, encryption, and retention.
 
 ## Upgrade and migration
 
@@ -86,9 +92,11 @@ operators own scheduling and retention.
 5. Start one canary workspace. Confirm health/readiness, task recovery, audit
    output, and provider access before broader rollout.
 
-The remote execution store migration is idempotent and records SQLite
-`user_version=2`. Other stores do not yet share a unified migration contract;
-that remains a hosted-deployment blocker in `PRODUCTION_CHECKPOINTS.md`.
+Every supported SQLite store records `PRAGMA user_version`. Migrations run in
+an immediate transaction, create an online pre-migration backup for an existing
+schema, reject databases newer than the running binary, and roll back on an
+error. Task schema is v3, remote execution is v2, and conversation, episodic,
+and long-term memory stores are v1.
 
 Pulse is an application distribution, so its direct runtime dependencies are
 pinned to the versions exercised by CI and recorded in the release SBOM.

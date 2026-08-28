@@ -1,4 +1,5 @@
 import asyncio
+import json
 from pathlib import Path
 
 import pytest
@@ -106,3 +107,19 @@ def test_session_event_bus_emission(session_manager: SessionManager) -> None:
     assert "session_created" in event_types
     assert "session_turn_added" in event_types
     assert "session_archived" in event_types
+
+
+def test_legacy_session_is_backed_up_and_migrated_atomically(
+    session_manager: SessionManager,
+) -> None:
+    path = session_manager.store.store_dir / "legacy.json"
+    path.write_text(
+        json.dumps({"id": "legacy", "title": "Legacy", "status": "ACTIVE"}),
+        encoding="utf-8",
+    )
+
+    session = session_manager.store.load("legacy")
+
+    assert session is not None and session.title == "Legacy"
+    assert path.with_suffix(".json.schema-v0.bak").is_file()
+    assert json.loads(path.read_text(encoding="utf-8"))["schema_version"] == 1

@@ -48,7 +48,11 @@ def test_save_and_get_active_selection(temp_workspace: Path) -> None:
     json_path = temp_workspace / ".agent" / "provider.json"
     assert json_path.exists()
     data = json.loads(json_path.read_text(encoding="utf-8"))
-    assert data == {"provider": "gemini", "model": "gemini-1.5-pro"}
+    assert data == {
+        "schema_version": 1,
+        "provider": "gemini",
+        "model": "gemini-1.5-pro",
+    }
 
     # Read back active selection
     read_p, read_m = pm.get_active_selection()
