@@ -30,7 +30,7 @@ explicit release action requiring registry credentials.
 | API compatibility | JSON-RPC negotiates a documented `1.x` compatibility contract | Pass | Keep breaking changes behind a new protocol major |
 | Type safety | Strict mypy gates policy, production validation, and evaluation core | Partial | Expand the checked baseline module by module |
 | Observability | Local structured telemetry/cost tracking exists | Partial | Add correlation, OpenTelemetry export, dashboards, and alert thresholds |
-| Evaluation | A versioned deterministic release corpus gates task and policy outcomes | Partial | Add provider E2E and longitudinal quality jobs |
+| Evaluation | Deterministic and secret-safe live-provider corpora have release thresholds | Partial | Run the provider gate in the protected hosted release environment |
 | Data lifecycle | Multiple SQLite stores exist | Gap | Define schemas, migrations, backup, retention, and corruption recovery |
 | Multi-user hosting | Token auth exists for remote execution | Blocked | Add real identity/authorization, tenant boundaries, rotation, and abuse controls |
 | Supply chain | Lockfile, checksums, manifest, CycloneDX SBOM, and signed-attestation workflow exist | Partial | Verify attestations on the published release |

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
 from pulse.core.protocols import StreamChunk
 from pulse.providers.base import BaseProvider
@@ -11,6 +12,16 @@ class OpenAIProvider(BaseProvider):
 
     api_key_env_var = "OPENAI_API_KEY"
     endpoint = "https://api.openai.com/v1/chat/completions"
+
+    def _build_payload(
+        self,
+        messages: list[dict[str, Any]],
+        temperature: float = 0.2,
+    ) -> dict[str, Any]:
+        payload = super()._build_payload(messages, temperature)
+        if self.config.provider == "openai":
+            payload["stream_options"] = {"include_usage": True}
+        return payload
 
     def _headers(self) -> dict[str, str]:
         return {
