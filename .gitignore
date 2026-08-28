@@ -40,6 +40,9 @@ pip-wheel-metadata/
 # Local data, logs, and editor/OS files
 .agent/logs/
 .agent/repository-index.json
+.agent/provider.json
+.agent/*.sqlite3-shm
+.agent/*.sqlite3-wal
 *.log
 *.sqlite
 *.sqlite3
@@ -59,3 +62,18 @@ node_modules/
 # Pulse agent workspace default
 .sandbox/
 .pulse/
+
+# Local release/debug artifacts
+coverage.json
+fetch_logs.py
+get_logs.py
+gh/
+gh.zip
+patch_tm.py
+pytest_output*.txt
+run_adversarial_audit.py
+run_linux_tests.py
+runs.json
+server_log.txt
+vscode-extension/out/
+vscode-extension/*.vsix
