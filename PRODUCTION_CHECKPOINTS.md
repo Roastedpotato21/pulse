@@ -33,7 +33,7 @@ explicit release action requiring registry credentials.
 | Evaluation | A verifier/trajectory harness and focused tests exist | Partial | Add versioned task corpus, quality thresholds, and provider E2E jobs |
 | Data lifecycle | Multiple SQLite stores exist | Gap | Define schemas, migrations, backup, retention, and corruption recovery |
 | Multi-user hosting | Token auth exists for remote execution | Blocked | Add real identity/authorization, tenant boundaries, rotation, and abuse controls |
-| Supply chain | Lockfile exists | Partial | Add SBOM, provenance, signed artifacts, and vulnerability policy |
+| Supply chain | Lockfile, checksums, source-bound manifest, and CycloneDX SBOM exist | Partial | Add signed provenance attestations and artifact signing |
 | Project license | No project license has been selected | Blocked for public distribution | Owner must choose and add a license before public publishing |
 | Documentation accuracy | Supported and evaluation-only boundaries are explicit | Pass | Review claims with every release |
 

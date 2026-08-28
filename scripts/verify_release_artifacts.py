@@ -36,6 +36,15 @@ FORBIDDEN_SUFFIXES = {
     ".zip",
 }
 EXPECTED_ENTRY_POINTS = {"pulse", "pulse-remote", "pulse-rpc"}
+EXPECTED_RUNTIME_REQUIREMENTS = {
+    "httpx==0.28.1",
+    "keyring==25.7.0",
+    "openai==2.44.0",
+    "python-dotenv==1.2.2",
+    "rich==15.0.0",
+    "typer==0.26.8",
+    "websockets==16.1",
+}
 
 
 def _normalized_version(value: str) -> str:
@@ -54,7 +63,7 @@ def _validate_names(archive: Path, names: list[str]) -> None:
         raise ValueError(f"{archive.name} contains forbidden release files:\n  {joined}")
 
 
-def _metadata_version(wheel: Path) -> str:
+def _metadata(wheel: Path):
     with zipfile.ZipFile(wheel) as archive:
         metadata_names = [
             name for name in archive.namelist() if name.endswith(".dist-info/METADATA")
@@ -62,10 +71,25 @@ def _metadata_version(wheel: Path) -> str:
         if len(metadata_names) != 1:
             raise ValueError(f"{wheel.name} must contain exactly one METADATA file")
         message = email.parser.BytesParser().parsebytes(archive.read(metadata_names[0]))
-        version = message.get("Version")
-        if not version:
-            raise ValueError(f"{wheel.name} metadata has no Version")
-        return version
+    return message
+
+
+def _metadata_version(wheel: Path) -> str:
+    version = _metadata(wheel).get("Version")
+    if not version:
+        raise ValueError(f"{wheel.name} metadata has no Version")
+    return version
+
+
+def _validate_runtime_requirements(wheel: Path) -> None:
+    requirements = set(_metadata(wheel).get_all("Requires-Dist", []))
+    if requirements != EXPECTED_RUNTIME_REQUIREMENTS:
+        missing = sorted(EXPECTED_RUNTIME_REQUIREMENTS - requirements)
+        unexpected = sorted(requirements - EXPECTED_RUNTIME_REQUIREMENTS)
+        raise ValueError(
+            f"{wheel.name} runtime dependency pins differ from the reviewed set; "
+            f"missing={missing}, unexpected={unexpected}"
+        )
 
 
 def _entry_points(wheel: Path) -> set[str]:
@@ -108,6 +132,7 @@ def verify(directory: Path, expected_version: str | None) -> None:
         _validate_names(sdist, archive.getnames())
 
     version = _metadata_version(wheel)
+    _validate_runtime_requirements(wheel)
     if expected_version and version != _normalized_version(expected_version):
         raise ValueError(
             f"artifact version {version!r} does not match release {expected_version!r}"

@@ -5,7 +5,11 @@ from pathlib import Path
 
 import pytest
 
-from scripts.verify_release_artifacts import _normalized_version, _validate_names
+from scripts.verify_release_artifacts import (
+    _normalized_version,
+    _validate_names,
+    _validate_runtime_requirements,
+)
 
 
 def test_release_tag_version_normalization() -> None:
@@ -46,3 +50,20 @@ def test_invalid_wheel_is_rejected(tmp_path: Path) -> None:
         pytest.raises(ValueError, match=r"pulse/.env"),
     ):
         _validate_names(wheel, archive.namelist())
+
+
+def test_release_artifact_rejects_unreviewed_runtime_dependencies(
+    tmp_path: Path,
+) -> None:
+    wheel = tmp_path / "invalid.whl"
+    with zipfile.ZipFile(wheel, mode="w") as archive:
+        archive.writestr(
+            "pulse_coding_agent-0.1.0.dist-info/METADATA",
+            "Metadata-Version: 2.4\n"
+            "Name: pulse-coding-agent\n"
+            "Version: 0.1.0\n"
+            "Requires-Dist: openai>=2\n",
+        )
+
+    with pytest.raises(ValueError, match="runtime dependency pins"):
+        _validate_runtime_requirements(wheel)

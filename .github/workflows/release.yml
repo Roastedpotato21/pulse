@@ -40,10 +40,28 @@ jobs:
       - run: >-
           uv run python scripts/verify_release_artifacts.py dist
           --expected-version "${{ github.event.release.tag_name }}"
+      - run: >-
+          uv run python scripts/generate_release_metadata.py
+          dist release-metadata --source-commit "${{ github.sha }}"
+      - run: >-
+          uv export --locked --no-dev --no-emit-project --no-hashes
+          --output-file release-metadata/runtime-requirements.txt
+      - run: >-
+          uv run pip-audit --progress-spinner off
+          --requirement release-metadata/runtime-requirements.txt --format cyclonedx-json
+          --output release-metadata/sbom.cdx.json
+      - run: >-
+          uv run python scripts/finalize_sbom.py release-metadata/sbom.cdx.json
+          release-metadata/release-manifest.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: python-distributions
           path: dist/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-metadata
+          path: release-metadata/
           if-no-files-found: error
 
   publish-pypi:
@@ -60,3 +78,24 @@ jobs:
           name: python-distributions
           path: dist/
       - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
+
+  publish-github-assets:
+    needs: build-and-verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: python-distributions
+          path: dist/
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-metadata
+          path: release-metadata/
+      - name: Attach distributions, checksums, manifest, and SBOM
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: >-
+          gh release upload "$RELEASE_TAG" dist/* release-metadata/* --clobber

@@ -21,13 +21,13 @@ classifiers = [
     "Topic :: Software Development",
 ]
 dependencies = [
-    "httpx>=0.28.0",
-    "keyring>=24.0.0",
-    "openai>=2.44.0",
-    "python-dotenv>=1.2.2",
-    "rich>=13.9.0",
-    "typer>=0.26.8",
-    "websockets>=15.0",
+    "httpx==0.28.1",
+    "keyring==25.7.0",
+    "openai==2.44.0",
+    "python-dotenv==1.2.2",
+    "rich==15.0.0",
+    "typer==0.26.8",
+    "websockets==16.1",
 ]
 
 [project.urls]

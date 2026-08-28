@@ -17,7 +17,10 @@ pre-1.0 APIs may change with release notes and migration guidance.
   operations/security documentation, and explicit deployment boundaries.
 - Reproducible wheel/source builds, artifact-content verification, clean-install
   smoke tests, cross-platform CI, coverage gate, dependency audit, secret scan,
-  and OIDC trusted-publishing workflow.
+  OIDC trusted-publishing workflow, release checksums, source manifest, and
+  CycloneDX SBOM.
+- Direct application dependencies pinned to the versions exercised by the
+  release suite, preventing unreviewed major-version drift at installation.
 
 ### Known limitations
 

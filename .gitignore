@@ -65,6 +65,7 @@ node_modules/
 
 # Local release/debug artifacts
 coverage.json
+release-metadata/
 fetch_logs.py
 get_logs.py
 gh/

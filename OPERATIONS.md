@@ -86,6 +86,11 @@ The remote execution store migration is idempotent and records SQLite
 `user_version=2`. Other stores do not yet share a unified migration contract;
 that remains a hosted-deployment blocker in `PRODUCTION_CHECKPOINTS.md`.
 
+Pulse is an application distribution, so its direct runtime dependencies are
+pinned to the versions exercised by CI and recorded in the release SBOM.
+Upgrades to those pins require a new Pulse release and the complete release
+gate; do not loosen them in a production environment.
+
 ## Rollback
 
 1. Stop the failing process. Do not automatically replay executions with an
@@ -130,7 +135,8 @@ threat boundary.
 5. Create tag `vX.Y.Z`, then publish a GitHub Release for that tag.
 6. The release workflow rebuilds and verifies the same source, uploads the
    tested artifact between jobs, and publishes to PyPI through OIDC trusted
-   publishing.
+   publishing. It also attaches SHA-256 checksums, a source-bound manifest, and
+   a CycloneDX SBOM to the GitHub Release.
 
 Before step 5, configure the `pypi` GitHub environment and a PyPI trusted
 publisher for `.github/workflows/release.yml`. Public publishing also requires
