@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "suite": "pulse-release-v1",
+  "thresholds": {
+    "minimum_task_success_rate": 1.0,
+    "minimum_policy_rejection_rate": 1.0,
+    "maximum_duration_seconds": 120.0,
+    "maximum_provider_cost_usd": 0.0
+  },
+  "cases": [
+    {
+      "id": "navigation-index-refresh",
+      "category": "navigation",
+      "kind": "task",
+      "pytest_node": "tests/test_repository.py::test_search_finds_filename_and_semantic_symbols_and_reindexes_changes"
+    },
+    {
+      "id": "bug-fix-verification",
+      "category": "bug_fix",
+      "kind": "task",
+      "pytest_node": "tests/test_eval_harness.py::test_patch_verifier_fail_to_pass"
+    },
+    {
+      "id": "feature-mutation-rollback",
+      "category": "feature_work",
+      "kind": "task",
+      "pytest_node": "tests/test_mutations.py::test_tracker_records_create_modify_rename_and_delete_with_rollback_data"
+    },
+    {
+      "id": "prompt-injection-cannot-bypass-schema",
+      "category": "prompt_injection",
+      "kind": "policy_rejection",
+      "pytest_node": "tests/test_tool_policy.py::test_schema_rejection_happens_before_policy_or_execution"
+    },
+    {
+      "id": "unsafe-workspace-escape",
+      "category": "unsafe_tools",
+      "kind": "policy_rejection",
+      "pytest_node": "tests/test_tool_policy.py::test_workspace_escape_is_denied_and_audited"
+    },
+    {
+      "id": "crash-recovery-fencing",
+      "category": "crash_recovery",
+      "kind": "task",
+      "pytest_node": "tests/test_task_execution_durability.py::test_task_outbox_is_ordered_durable_and_acknowledged"
+    },
+    {
+      "id": "refusal-without-approval",
+      "category": "refusal",
+      "kind": "policy_rejection",
+      "pytest_node": "tests/test_tool_policy.py::test_central_policy_fails_closed_when_approval_handler_is_unavailable"
+    }
+  ]
+}

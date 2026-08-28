@@ -53,6 +53,16 @@ jobs:
         run: >-
           uv run pytest tests/ -k "not sandbox"
           --cov=pulse --cov-report=term-missing --cov-fail-under=54
+      - name: Run release evaluation gate
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
+        run: uv run python scripts/run_release_evals.py evals/release-v1.json release-metadata/eval-report.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
+        with:
+          name: release-evaluation
+          path: release-metadata/eval-report.json
+          if-no-files-found: error
+          retention-days: 14
 
   dependency-audit:
     runs-on: ubuntu-latest

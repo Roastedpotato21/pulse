@@ -30,7 +30,7 @@ explicit release action requiring registry credentials.
 | API compatibility | CLI/RPC are unversioned and pre-1.0 | Gap | Declare compatibility policy and version RPC envelopes |
 | Type safety | Type hints exist but no type-checking gate | Gap | Introduce a type checker incrementally with a checked-core baseline |
 | Observability | Local structured telemetry/cost tracking exists | Partial | Add correlation, OpenTelemetry export, dashboards, and alert thresholds |
-| Evaluation | A verifier/trajectory harness and focused tests exist | Partial | Add versioned task corpus, quality thresholds, and provider E2E jobs |
+| Evaluation | A versioned deterministic release corpus gates task and policy outcomes | Partial | Add provider E2E and longitudinal quality jobs |
 | Data lifecycle | Multiple SQLite stores exist | Gap | Define schemas, migrations, backup, retention, and corruption recovery |
 | Multi-user hosting | Token auth exists for remote execution | Blocked | Add real identity/authorization, tenant boundaries, rotation, and abuse controls |
 | Supply chain | Lockfile, checksums, source-bound manifest, and CycloneDX SBOM exist | Partial | Add signed provenance attestations and artifact signing |
@@ -102,9 +102,9 @@ can detect and recover common failures.
   backup/rollback tests.
 - [ ] Add idempotency and recovery tests for every external side effect, not
   only task execution.
-- [ ] Create a versioned evaluation corpus covering navigation, bug fixing,
+- [x] Create a versioned evaluation corpus covering navigation, bug fixing,
   feature work, prompt injection, unsafe tools, crash recovery, and refusal.
-- [ ] Gate releases on task success, verifier precision, policy-rejection,
+- [x] Gate releases on task success, verifier precision, policy-rejection,
   latency, and cost budgets.
 - [ ] Add golden traces and deterministic provider/sandbox fakes.
 - [ ] Define context provenance, citation, redaction, and uncertainty contracts.
@@ -160,9 +160,12 @@ artifact, or operational-document link in the implementing commit.
 ## Release Candidate Evidence — 2026-08-28
 
 - Ruff passes for `src`, `tests`, and `scripts`.
-- Full local suite: 369 passed, 16 environment-dependent tests skipped.
-- CI-equivalent non-sandbox suite: 257 passed with 55.20% coverage against a
+- Full local suite: 377 passed, 16 environment-dependent tests skipped.
+- CI-equivalent non-sandbox suite: 265 passed with coverage above the
   54% ratcheting floor.
+- The versioned seven-category release evaluation passes at 100% task success
+  and policy rejection with no provider spend; invalid patches are never
+  credited as fixes.
 - Actionlint accepts both GitHub workflows; the VS Code TypeScript source
   compiles after `npm ci`.
 - Gitleaks scans the complete repository history with only documented synthetic fixtures

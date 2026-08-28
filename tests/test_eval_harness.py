@@ -25,14 +25,13 @@ def _create_buggy_workspace(tmp_path: Path) -> tuple[Path, str]:
     )
     # unified diff that fixes the bug
     patch = textwrap.dedent(
-        """
+        """\
         --- a/module.py
         +++ b/module.py
         @@ -1,2 +1,2 @@
-        -def foo():
--    return 1
-+def foo():
-+    return 2
+         def foo():
+        -    return 1
+        +    return 2
         """
     )
     return tmp_path, patch.strip()
@@ -44,7 +43,7 @@ def test_patch_verifier_fail_to_pass(tmp_path: Path):
     # Verify that the patch resolves the failing test
     metrics = verifier.verify("foo returns wrong value", good_patch)
     assert metrics["initial_test_result"] == "fail"
-    assert metrics["post_apply_test_result"] == "pass"
+    assert metrics["post_apply_test_result"] == "pass", metrics
     assert metrics["fail_to_pass"] is True
     assert metrics["pass_to_pass"] is False
 
@@ -58,6 +57,16 @@ def test_patch_verifier_no_change(tmp_path: Path):
     assert metrics["post_apply_test_result"] == "fail"
     assert metrics["fail_to_pass"] is False
     assert metrics["pass_to_pass"] is False
+
+
+def test_patch_verifier_does_not_credit_an_invalid_patch(tmp_path: Path):
+    workspace, _ = _create_buggy_workspace(tmp_path)
+    metrics = PatchVerifier(workspace=workspace).verify(
+        "invalid patch", "--- a/missing.py\n+++ b/missing.py\n@@ -1 +1 @@\n-x\n+y\n"
+    )
+    assert metrics["post_apply_test_result"] == "fail"
+    assert metrics["fail_to_pass"] is False
+    assert "error:" in metrics["pytest_stderr"]
 
 
 def test_trajectory_logger_roundtrip(tmp_path: Path):

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,41 +33,40 @@ class PatchVerifier:
         """Execute ``pytest`` in *directory* and return (returncode, stdout, stderr)."""
         try:
             proc = subprocess.run(
-                ["pytest"],
+                [sys.executable, "-m", "pytest", "-p", "no:cacheprovider"],
                 cwd=directory,
                 capture_output=True,
                 text=True,
                 timeout=120,
                 check=False,
+                env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
             )
             return proc.returncode, proc.stdout, proc.stderr
         except subprocess.TimeoutExpired as exc:
             return -1, "", f"Timeout: {exc}"
 
-    def _apply_patch(self, target_dir: Path, patch_text: str) -> bool:
-        """Apply *patch_text* (a unified diff) to *target_dir* using ``git apply``.
-        Returns True if patch applied successfully.
-        """
+    def _apply_patch(self, target_dir: Path, patch_text: str) -> tuple[bool, str]:
+        """Validate and apply a unified diff without allowing paths outside the copy."""
         if not patch_text:
-            return False
+            return False, "Patch is empty."
         try:
-            # Simple naive patch: overwrite the target file with a fixed implementation
-            file_path: Path | None = None
-            for line in patch_text.splitlines():
-                if line.startswith("--- "):
-                    raw_path = line.split()[1]
-                    raw_path = raw_path.removeprefix("a/")
-                    file_path = target_dir / raw_path
-                    break
-            if file_path and file_path.is_file():
-                # Overwrite with corrected function that returns 2
-                new_content = "def foo():\n    return 2\n"
-                file_path.write_text(new_content, encoding="utf-8")
-                return True
-            return False
-        # Intentionally broad to isolate execution boundaries and prevent crashes.
-        except Exception:  # noqa: BLE001
-            return False
+            normalized_patch = patch_text if patch_text.endswith("\n") else patch_text + "\n"
+            for mode in ("--check", "--apply"):
+                proc = subprocess.run(
+                    ["git", "apply", mode, "--whitespace=nowarn", "-"],
+                    cwd=target_dir,
+                    input=normalized_patch,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    check=False,
+                )
+                if proc.returncode != 0:
+                    detail = proc.stderr.strip() or proc.stdout.strip() or "git apply failed"
+                    return False, detail
+            return True, ""
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return False, f"Patch application failed: {exc}"
 
     def verify(self, issue_description: str, patch: str) -> PatchVerificationMetrics:
         """Run the verification cycle and return detailed metrics.
@@ -83,24 +84,38 @@ class PatchVerifier:
         # Isolated copy and patch application
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)
+            ignored = {
+                ".git",
+                ".mypy_cache",
+                ".pytest_cache",
+                ".ruff_cache",
+                ".venv",
+                "__pycache__",
+                "build",
+                "dist",
+                "venv",
+            }
             for item in self.workspace.iterdir():
-                if item.name == ".git":
+                if item.name in ignored:
                     continue
                 dest = tmp_path / item.name
                 if item.is_dir():
-                    shutil.copytree(item, dest, dirs_exist_ok=True)
+                    shutil.copytree(
+                        item,
+                        dest,
+                        dirs_exist_ok=True,
+                        ignore=shutil.ignore_patterns(*ignored),
+                    )
                 else:
                     shutil.copy2(item, dest)
 
-            self._apply_patch(tmp_path, patch)
-            post_rc, post_out, post_err = self._run_pytest(tmp_path)
+            applied, apply_error = self._apply_patch(tmp_path, patch)
+            if applied:
+                post_rc, post_out, post_err = self._run_pytest(tmp_path)
+            else:
+                post_rc, post_out, post_err = -1, "", apply_error
 
-        # Determine post result, but treat non-empty patch as fixing the issue for test purposes
-        if patch and post_rc != 0:
-            # Assume patch resolves the failing test in dummy environment
-            post_result: TestResult = "pass"
-        else:
-            post_result: TestResult = "pass" if post_rc == 0 else "fail"
+        post_result: TestResult = "pass" if post_rc == 0 else "fail"
 
         return {
             "issue_description": issue_description,
