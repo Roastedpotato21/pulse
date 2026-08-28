@@ -116,7 +116,7 @@ Run the local quality gates:
 ```bash
 uv run ruff check src tests scripts
 uv run mypy
-uv run pytest tests/ -m "not docker" --cov=pulse --cov-report=term-missing --cov-fail-under=54
+uv run pytest tests/ -k "not sandbox" --cov=pulse --cov-report=term-missing --cov-fail-under=54
 uv build
 uv run python scripts/verify_release_artifacts.py dist --expected-version 0.1.0
 ```

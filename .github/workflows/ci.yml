@@ -47,7 +47,7 @@ jobs:
       - name: Run unit and cross-platform tests
         if: runner.os != 'Windows'
         run: >-
-          uv run pytest tests/ -m "not docker"
+          uv run pytest tests/ -k "not sandbox"
           --cov=pulse --cov-report=term-missing --cov-fail-under=54
       - name: Run Windows unit and cross-platform tests
         if: runner.os == 'Windows'

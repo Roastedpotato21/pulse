@@ -36,7 +36,7 @@ jobs:
       - run: uv run ruff check src tests scripts
       - run: uv run mypy
       - run: >-
-          uv run pytest tests/ -m "not docker"
+          uv run pytest tests/ -k "not sandbox"
           --cov=pulse --cov-report=term-missing --cov-fail-under=54
       - run: uv run python scripts/run_release_evals.py evals/release-v1.json release-metadata/eval-report.json
       - run: uv run pip-audit --progress-spinner off
