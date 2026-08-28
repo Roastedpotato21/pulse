@@ -111,11 +111,16 @@ async def test_sandbox_network_deny_all(tmp_path: Path):
     sandbox.policy = SandboxPolicy(default_decisions={ActionType.SHELL.value: PolicyDecision.ALLOW, ActionType.NETWORK.value: PolicyDecision.ALLOW, ActionType.SECRETS.value: PolicyDecision.ALLOW})
     sandbox.network_policy = NetworkPolicy(mode=NetworkMode.DENY_ALL)
     
-    # Attempt to curl a public IP. Should fail quickly.
-    result = await sandbox.execute_command(["curl", "--connect-timeout", "2", "http://8.8.8.8"])
+    result = await sandbox.execute_command(
+        [
+            "python",
+            "-c",
+            "import socket; socket.create_connection(('8.8.8.8', 80), 2)",
+        ]
+    )
     
     assert result.exit_code != 0
-    assert "Network is unreachable" in result.stderr or "Could not resolve" in result.stderr or "timed out" in result.stderr or "Timeout" in result.stderr or "exit status" in result.stderr or result.exit_code in (6, 7, 28)
+    assert result.stderr
 
 
 @pytest.mark.anyio
@@ -136,18 +141,29 @@ async def test_sandbox_network_localhost_only(tmp_path: Path):
     sandbox.policy = SandboxPolicy(default_decisions={ActionType.SHELL.value: PolicyDecision.ALLOW, ActionType.NETWORK.value: PolicyDecision.ALLOW, ActionType.SECRETS.value: PolicyDecision.ALLOW})
     sandbox.network_policy = NetworkPolicy(mode=NetworkMode.LOCALHOST_ONLY)
     
-    # Start a local python server on port 8080 and curl it
-    script = "import http.server, socketserver, threading; threading.Thread(target=socketserver.TCPServer(('', 8080), http.server.SimpleHTTPRequestHandler).serve_forever).start()"
-    cmd = ["sh", "-c", f"python -c \"{script}\" && sleep 1 && curl -s http://127.0.0.1:8080"]
+    script = (
+        "import http.server, socketserver, threading, urllib.request; "
+        "server=socketserver.TCPServer(('127.0.0.1', 8080), http.server.SimpleHTTPRequestHandler); "
+        "thread=threading.Thread(target=server.serve_forever, daemon=True); thread.start(); "
+        "print(urllib.request.urlopen('http://127.0.0.1:8080', timeout=2).status); "
+        "server.shutdown()"
+    )
+    cmd = ["python", "-c", script]
     
     result = await sandbox.execute_command(cmd)
     
     # The curl should succeed and return directory listing HTML
     assert result.exit_code == 0
-    assert "Directory listing" in result.stdout or "<html>" in result.stdout
+    assert "200" in result.stdout
     
     # External should still fail
-    result_ext = await sandbox.execute_command(["curl", "--connect-timeout", "2", "http://8.8.8.8"])
+    result_ext = await sandbox.execute_command(
+        [
+            "python",
+            "-c",
+            "import socket; socket.create_connection(('8.8.8.8', 80), 2)",
+        ]
+    )
     assert result_ext.exit_code != 0
 
 

@@ -144,13 +144,12 @@ threat boundary.
 3. Run the full local release verification and push the commits.
 4. Wait for required CI checks on the release commit, including live Docker
    security tests.
-5. Create tag `vX.Y.Z`, then publish a GitHub Release for that tag.
-6. The release workflow rebuilds and verifies the same source, uploads the
-   tested artifact between jobs, and publishes to PyPI through OIDC trusted
-   publishing. It also attaches SHA-256 checksums, a source-bound manifest, and
-   a CycloneDX SBOM to the GitHub Release.
+5. Push tag `vX.Y.Z`. Do not manually create the GitHub Release.
+6. The protected tag workflow rebuilds and verifies the source, runs the live
+   provider and no-skip Docker security gates, publishes to PyPI through OIDC,
+   then creates the GitHub Release. It attaches SHA-256 checksums, a
+   source-bound manifest, evaluation evidence, and a CycloneDX SBOM.
 
-Before step 5, configure the `pypi` GitHub environment and a PyPI trusted
-publisher for `.github/workflows/release.yml`. Public publishing also requires
-the owner to choose and add a project license; this repository currently does
-not grant one.
+Before step 5, configure the `public-beta` environment with `OPENAI_API_KEY`
+and optional `PULSE_E2E_MODEL`, then configure the `pypi` environment and PyPI
+trusted publisher for `.github/workflows/release.yml`.

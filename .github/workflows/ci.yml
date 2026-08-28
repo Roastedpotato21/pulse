@@ -6,12 +6,6 @@ on:
     branches: [master, main]
     tags: ["v*"]
   workflow_dispatch:
-    inputs:
-      docker_security_tests:
-        description: Run live Docker sandbox security tests
-        required: false
-        default: true
-        type: boolean
 
 permissions:
   contents: read
@@ -107,7 +101,7 @@ jobs:
       - run: npm run compile
 
   package:
-    needs: [test, dependency-audit, secret-scan, vscode-extension]
+    needs: [test, dependency-audit, secret-scan, vscode-extension, docker-security]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -153,7 +147,6 @@ jobs:
           retention-days: 14
 
   docker-security:
-    if: github.event_name != 'workflow_dispatch' || inputs.docker_security_tests
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -164,5 +157,16 @@ jobs:
           python-version: "3.12"
       - run: uv sync --locked
       - run: docker info
-      - name: Run live Docker sandbox security tests
+      - run: docker pull python:3.11-slim
+      - run: docker pull alpine:3.22
+      - name: Run complete sandbox test suite
         run: uv run pytest tests/ -k sandbox
+      - name: Run live Docker sandbox security tests
+        run: uv run python scripts/run_docker_release_tests.py release-metadata/docker-release.xml
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: docker-security-report
+          path: release-metadata/docker-release.xml
+          if-no-files-found: error
+          retention-days: 14

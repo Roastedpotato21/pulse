@@ -22,7 +22,7 @@ async def test_reconciliation_cleans_orphaned_containers() -> None:
     
     # 1. Manually start a sleeping container labeled as managed by Pulse
     proc = await asyncio.create_subprocess_shell(
-        f"docker run -d --label pulse.sandbox.managed=true --label pulse.sandbox.execution_id={execution_id} alpine sleep 3600",
+        f"docker run -d --label pulse.sandbox.managed=true --label pulse.sandbox.execution_id={execution_id} alpine:3.22 sleep 3600",
         stdout=asyncio.subprocess.PIPE
     )
     stdout, _ = await proc.communicate()

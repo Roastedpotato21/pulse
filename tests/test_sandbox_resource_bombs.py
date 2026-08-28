@@ -6,8 +6,8 @@ from tempfile import TemporaryDirectory
 
 import pytest
 
-from pulse.config import SandboxConfig
 from pulse.sandbox.api import Sandbox
+from pulse.sandbox.policy import ActionType, PolicyDecision, SandboxPolicy
 from pulse.sandbox.resources import ResourceLimits
 
 
@@ -18,15 +18,17 @@ async def test_memory_exhaustion_bomb() -> None:
         pytest.skip("Docker is required for memory limit tests.")
         
     with TemporaryDirectory() as directory:
-        from pulse.audit import AuditLog
-        
         tmp_path = Path(directory)
-        audit = AuditLog(tmp_path / "audit.jsonl")
-        config = SandboxConfig(workspace_root=tmp_path)
-        sandbox = Sandbox(config, audit_logger=audit)
-        
-        # Restrict memory strictly to 64MB
-        sandbox.limits = ResourceLimits(max_memory_bytes=64 * 1024 * 1024, timeout_seconds=10.0)
+        sandbox = Sandbox(
+            workspace_root=tmp_path,
+            limits=ResourceLimits(
+                max_memory_bytes=64 * 1024 * 1024, timeout_seconds=10.0
+            ),
+            policy=SandboxPolicy(
+                default_decisions={ActionType.SHELL.value: PolicyDecision.ALLOW}
+            ),
+        )
+        await sandbox.initialize()
         
         # Try to allocate 200MB of memory in Python inside the container
         bomb = "python -c \"x = 'A' * 200 * 1024 * 1024; import time; time.sleep(5)\""
@@ -46,15 +48,17 @@ async def test_storage_exhaustion_bomb() -> None:
         pytest.skip("Docker is required for storage limit tests.")
         
     with TemporaryDirectory() as directory:
-        from pulse.audit import AuditLog
-        
         tmp_path = Path(directory)
-        audit = AuditLog(tmp_path / "audit.jsonl")
-        config = SandboxConfig(workspace_root=tmp_path)
-        sandbox = Sandbox(config, audit_logger=audit)
-        
-        # Restrict disk explicitly to 50MB
-        sandbox.limits = ResourceLimits(max_storage_bytes=50 * 1024 * 1024, timeout_seconds=10.0)
+        sandbox = Sandbox(
+            workspace_root=tmp_path,
+            limits=ResourceLimits(
+                max_storage_bytes=50 * 1024 * 1024, timeout_seconds=10.0
+            ),
+            policy=SandboxPolicy(
+                default_decisions={ActionType.SHELL.value: PolicyDecision.ALLOW}
+            ),
+        )
+        await sandbox.initialize()
         
         # Try to write 100MB of data to the overlay
         bomb = "dd if=/dev/zero of=/workspace-overlay/bomb.img bs=1M count=100"

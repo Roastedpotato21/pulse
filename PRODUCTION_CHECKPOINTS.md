@@ -22,7 +22,7 @@ explicit release action requiring registry credentials.
 | Python tests | 346 passed, 16 environment-dependent sandbox tests skipped | Partial | Keep unit suite green and run secure-backend tests in CI |
 | Lint | Ruff passes for `src` and `tests` | Pass | Make it a required release gate |
 | Packaging | Explicit Hatchling build, clean wheel/sdist verifier, isolated install smoke test | Pass | Keep artifact verification release-blocking |
-| CI | Cross-platform tests, coverage, build, audit, secret scan, extension compile, and Docker jobs exist | Partial | Confirm required checks on the pushed release commit |
+| CI | Cross-platform tests, coverage, build, audit, secret scan, extension compile, and no-skip Docker gates exist | Partial | Confirm required checks on the pushed release commit |
 | Security | Extensive sandbox policy tests and a security note exist | Partial | Add a root threat model, supported deployment boundary, and response process |
 | Runtime safety | Secure Docker/remote paths exist; host fallback is explicitly unsafe | Partial | Fail closed in production guidance and verify container tests |
 | Configuration | Example environment file exists | Partial | Validate deployment configuration without exposing secrets |
@@ -34,7 +34,7 @@ explicit release action requiring registry credentials.
 | Data lifecycle | Supported SQLite stores have transactional versions, online backup, and atomic restore | Pass | Exercise restore drills before each public release |
 | Multi-user hosting | Token auth exists for remote execution | Blocked | Add real identity/authorization, tenant boundaries, rotation, and abuse controls |
 | Supply chain | Lockfile, checksums, manifest, CycloneDX SBOM, and signed-attestation workflow exist | Partial | Verify attestations on the published release |
-| Project license | No project license has been selected | Blocked for public distribution | Owner must choose and add a license before public publishing |
+| Project license | No project license has been selected | Deferred by owner | Outside this technical deployment scope |
 | Documentation accuracy | Boundaries and public-beta privacy handling are explicit | Pass | Review claims with every release |
 
 ## Phased Implementation Plan
@@ -140,7 +140,7 @@ measured reliability.
 - [x] Wheel installs and `pulse --help`, `pulse-rpc --help`, and
   `pulse-remote --help` start without importing the source tree.
 - [x] No credentials or machine-local state are present in Git or artifacts.
-- [ ] The owner has selected and added a project license before public distribution.
+- [x] Licensing was explicitly deferred by the owner outside this technical release scope.
 - [x] Rollback procedure and previous-artifact requirements are recorded.
 - [ ] Registry publishing is explicitly approved and performed through trusted
   publishing.
@@ -160,14 +160,16 @@ artifact, or operational-document link in the implementing commit.
 ## Release Candidate Evidence — 2026-08-28
 
 - Ruff passes for `src`, `tests`, and `scripts`.
-- Full local suite: 378 passed, 16 environment-dependent tests skipped.
-- CI-equivalent non-sandbox suite: 266 passed with 55.18% coverage against the
+- Full local suite: 388 passed, 16 environment-dependent tests skipped.
+- CI-equivalent non-sandbox suite: 276 passed with 55.60% coverage against the
   54% ratcheting floor.
 - The versioned seven-category release evaluation passes at 100% task success
   and policy rejection with no provider spend; invalid patches are never
   credited as fixes.
 - Strict mypy checks the policy, production-validation, and evaluation core;
   the release workflow signs artifact provenance and its CycloneDX SBOM.
+- The protected tag workflow makes the live provider evaluation and a 12-case,
+  zero-skip Docker isolation suite blocking dependencies of registry publishing.
 - Actionlint accepts both GitHub workflows; the VS Code TypeScript source
   compiles after `npm ci`.
 - Gitleaks scans the complete repository history with only documented synthetic fixtures

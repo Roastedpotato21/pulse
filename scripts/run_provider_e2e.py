@@ -59,8 +59,8 @@ async def run(corpus_path: Path, report_path: Path) -> bool:
     suite: dict[str, Any] = json.loads(corpus_path.read_text(encoding="utf-8"))
     if suite.get("schema_version") != 1 or not isinstance(suite.get("messages"), list):
         raise ValueError("Provider corpus must use schema_version 1 and contain messages.")
-    provider_name = os.environ.get("PULSE_E2E_PROVIDER", str(suite["provider"]))
-    model_name = os.environ.get("PULSE_E2E_MODEL", str(suite["default_model"]))
+    provider_name = os.environ.get("PULSE_E2E_PROVIDER") or str(suite["provider"])
+    model_name = os.environ.get("PULSE_E2E_MODEL") or str(suite["default_model"])
     manager = ProviderManager(Path.cwd())
     provider = manager.create_provider(
         ModelConfig(
