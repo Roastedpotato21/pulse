@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from pulse.sandbox.api import Sandbox
 from pulse.sandbox.backend import ContainerBackend, DockerBackend, HostBackend
 from pulse.sandbox.network import NetworkMode, NetworkPolicy
 from pulse.sandbox.process import ProcessResult
@@ -61,6 +62,37 @@ def test_docker_backend_network_enabled(tmp_path: Path):
     cmd_str = " ".join(cmd_args)
     assert "podman run" in cmd_str
     assert "--network none" not in cmd_str
+
+
+@pytest.mark.anyio
+async def test_backend_selection_prefers_operational_docker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = DockerBackend()
+    probes: list[str] = []
+
+    async def operational(engine: str) -> bool:
+        probes.append(engine)
+        return True
+
+    monkeypatch.setattr(backend, "_engine_operational", operational)
+    assert await backend.is_available() is True
+    assert backend.name == "docker"
+    assert probes == ["docker"]
+
+
+@pytest.mark.anyio
+async def test_explicit_backend_is_reconciled_on_initialize(tmp_path: Path) -> None:
+    class RecordingBackend(HostBackend):
+        reconciled = False
+
+        async def reconcile(self) -> None:
+            self.reconciled = True
+
+    backend = RecordingBackend()
+    sandbox = Sandbox(tmp_path, backend=backend, unsafe_host_execution=True)
+    await sandbox.initialize()
+    assert backend.reconciled is True
 
 
 @pytest.mark.anyio

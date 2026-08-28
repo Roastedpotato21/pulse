@@ -128,7 +128,9 @@ class Sandbox:
             3. If unavailable AND unsafe_host_execution=False: raise SandboxUnavailableError.
         """
         if self._backend_explicit and self.backend is not None:
-            # Caller provided an explicit backend — respect it
+            # Respect the caller's backend selection while still performing
+            # mandatory startup reconciliation.
+            await self.backend.reconcile()
             self._initialized = True
             return
 
@@ -412,7 +414,10 @@ class Sandbox:
                     secret_policy=effective_secret_policy,
                     execution_id=execution_id,
                 )
-                execution.transition(LifecycleState.COMPLETING)
+                if result.timed_out or result.exit_code != 0:
+                    execution.transition(LifecycleState.FAILED)
+                else:
+                    execution.transition(LifecycleState.COMPLETING)
             except Exception:
                 execution.transition(LifecycleState.FAILED)
                 raise

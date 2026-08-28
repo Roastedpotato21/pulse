@@ -58,6 +58,22 @@ async def test_process_manager_timeout_enforcement():
 
 
 @pytest.mark.anyio
+async def test_process_manager_preserves_output_before_timeout():
+    pm = ProcessManager()
+    limits = ResourceLimits(timeout_seconds=0.5)
+
+    code = (
+        "import time; "
+        "print('OUTPUT_BEFORE_TIMEOUT', flush=True); "
+        "time.sleep(5.0)"
+    )
+    result = await pm.execute([sys.executable, "-c", code], limits=limits)
+
+    assert result.timed_out is True
+    assert "OUTPUT_BEFORE_TIMEOUT" in result.stdout
+
+
+@pytest.mark.anyio
 async def test_process_manager_output_size_cap():
     pm = ProcessManager()
     limits = ResourceLimits(max_output_bytes=100)

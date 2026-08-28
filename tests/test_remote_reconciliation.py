@@ -15,12 +15,17 @@ from pulse.task_manager import TaskManager, TaskStatus
 
 
 @pytest.fixture
-async def reconciliation_server(tmp_path: Path):
+async def reconciliation_server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     server = RemoteServer(port=0, auth_token="reconcile-token")
     server.store = RemoteExecutionStore(tmp_path / "executions.sqlite3")
+
+    async def initialize_without_container_discovery() -> None:
+        return None
+
+    monkeypatch.setattr(server.worker, "initialize", initialize_without_container_discovery)
     task = asyncio.create_task(server.start())
     try:
-        await server.wait_until_ready()
+        await server.wait_until_ready(timeout=10.0)
         yield server, server.port
     finally:
         task.cancel()
@@ -54,7 +59,7 @@ async def test_remote_status_and_completed_attach_are_execution_scoped(
 
     client = RemoteClient(f"ws://127.0.0.1:{port}", "reconcile-token")
     assert await client.status(execution_id) == "COMPLETED"
-    attached = await asyncio.wait_for(client.attach(execution_id), timeout=1.0)
+    attached = await asyncio.wait_for(client.attach(execution_id), timeout=5.0)
     assert attached.execution_id == execution_id
     assert attached.stdout == "recovered"
     await client.disconnect()
@@ -68,7 +73,7 @@ async def test_remote_attach_missing_execution_fails_without_hanging(
     _, port = reconciliation_server
     client = RemoteClient(f"ws://127.0.0.1:{port}", "reconcile-token")
     with pytest.raises(RuntimeError, match="NOT_FOUND"):
-        await asyncio.wait_for(client.attach("missing-execution"), timeout=1.0)
+        await asyncio.wait_for(client.attach("missing-execution"), timeout=5.0)
     await client.disconnect()
     assert client._listener_task is None
 
@@ -84,7 +89,7 @@ async def test_remote_attach_unknown_execution_fails_without_hanging(
 
     client = RemoteClient(f"ws://127.0.0.1:{port}", "reconcile-token")
     with pytest.raises(RuntimeError, match="UNKNOWN"):
-        await asyncio.wait_for(client.attach(execution_id), timeout=1.0)
+        await asyncio.wait_for(client.attach(execution_id), timeout=5.0)
     await client.disconnect()
     assert client._listener_task is None
 

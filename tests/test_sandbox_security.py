@@ -639,7 +639,12 @@ async def test_container_overlay_extraction(tmp_path: Path):
     
     policy = SandboxPolicy(default_decisions={"shell": PolicyDecision.ALLOW, "write": PolicyDecision.ALLOW})
     
-    sandbox = Sandbox(workspace, policy=policy)
+    from pulse.sandbox.backend.docker import DockerBackend
+
+    backend = DockerBackend(container_engine="docker")
+    if not await backend.is_available():
+        pytest.skip("Docker daemon is unavailable")
+    sandbox = Sandbox(workspace, policy=policy, backend=backend)
     
     try:
         await sandbox.initialize()

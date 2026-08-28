@@ -22,10 +22,8 @@ from __future__ import annotations
 
 import asyncio
 import os
-import shlex
 import shutil
 import stat
-import sys
 import tempfile
 import typing
 import uuid
@@ -70,23 +68,33 @@ class DockerBackend:
         Queries the engine for containers labeled with `pulse.sandbox.managed=true`
         and force-removes them. This guarantees no leftover processes consume resources.
         """
+        if not await self.is_available():
+            return
         engine = self._engine
         if not engine:
-            if shutil.which("podman"): engine = "podman"
-            elif shutil.which("docker"): engine = "docker"
-            else: return
+            return
 
-        find_cmd = f"{engine} ps -a -q --filter label=pulse.sandbox.managed=true"
-        proc = await asyncio.create_subprocess_shell(
-            find_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL
+        proc = await asyncio.create_subprocess_exec(
+            engine,
+            "ps",
+            "-a",
+            "-q",
+            "--filter",
+            "label=pulse.sandbox.managed=true",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
         )
         stdout, _ = await proc.communicate()
         cids = stdout.decode().strip().split()
         
         if cids:
-            rm_cmd = f"{engine} rm -f " + " ".join(cids)
-            rm_proc = await asyncio.create_subprocess_shell(
-                rm_cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
+            rm_proc = await asyncio.create_subprocess_exec(
+                engine,
+                "rm",
+                "-f",
+                *cids,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
             )
             await rm_proc.wait()
 
@@ -95,16 +103,34 @@ class DockerBackend:
         return self._engine or "docker"
 
     async def is_available(self) -> bool:
-        """Check if Docker or Podman CLI is installed on the host."""
+        """Check that a Docker or Podman CLI and its daemon are operational."""
         if self._engine:
-            return shutil.which(self._engine) is not None
-        if shutil.which("podman"):
-            self._engine = "podman"
-            return True
-        if shutil.which("docker"):
-            self._engine = "docker"
-            return True
+            return await self._engine_operational(self._engine)
+        for candidate in ("docker", "podman"):
+            if await self._engine_operational(candidate):
+                self._engine = candidate
+                return True
         return False
+
+    @staticmethod
+    async def _engine_operational(engine: str) -> bool:
+        if not shutil.which(engine):
+            return False
+        proc: asyncio.subprocess.Process | None = None
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                engine,
+                "info",
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await asyncio.wait_for(proc.wait(), timeout=10.0)
+            return proc.returncode == 0
+        except (OSError, TimeoutError):
+            if proc is not None and proc.returncode is None:
+                proc.kill()
+                await proc.wait()
+            return False
 
     def get_network_enforcement_capability(self, policy: NetworkPolicy) -> NetworkEnforcementLevel:
         """Determine what level of security this backend can enforce for the policy.
@@ -386,42 +412,35 @@ class DockerBackend:
         """Securely extract overlay files from container to host.
 
         Security architecture (Finding #3):
-            - On POSIX: pipes ``docker cp`` through ``tar`` with safety flags
-              ``--no-same-owner`` and ``--no-same-permissions`` to strip
-              container UID/GID and apply the host user's umask.
-            - On Windows: uses direct ``docker cp`` (tar piping unavailable).
-            - Post-extraction: validates all extracted paths stay within
-              the destination directory.  Any escaping files are removed.
+            - Uses an argv-based ``docker cp``/``podman cp`` invocation on all
+              platforms, avoiding shell pipelines and quoting ambiguity.
+            - Treats extraction errors as execution failures instead of
+              silently returning an empty overlay.
+            - Post-extraction validates that all paths remain within the
+              destination directory.
         """
-        if sys.platform != "win32":
-            # Stream through tar with explicit safety flags
-            safe_dest = shlex.quote(str(dest))
-            safe_cid = shlex.quote(cid)
-            cp_cmd_str = (
-                f"{engine} cp {safe_cid}:/workspace-overlay/. - "
-                f"| tar --no-same-owner --no-same-permissions -xf - -C {safe_dest}"
+        cp_cmd = [engine, "cp", f"{cid}:/workspace-overlay/.", str(dest)]
+        proc = await asyncio.create_subprocess_exec(
+            *cp_cmd,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            detail = stderr.decode("utf-8", errors="replace").strip()
+            raise RuntimeError(
+                f"{engine} overlay extraction failed with exit code "
+                f"{proc.returncode}: {detail or 'no diagnostic output'}"
             )
-            proc = await asyncio.create_subprocess_shell(
-                cp_cmd_str,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            await proc.wait()
-        else:
-            cp_cmd = [engine, "cp", f"{cid}:/workspace-overlay/.", str(dest)]
-            proc = await asyncio.create_subprocess_exec(
-                *cp_cmd,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            await proc.wait()
 
         # Post-extraction validation: remove any file that escaped dest
         resolved_dest = dest.resolve()
         for item in list(dest.rglob("*")):
             try:
                 if not item.resolve().is_relative_to(resolved_dest):
-                    if item.is_dir():
+                    if item.is_symlink():
+                        item.unlink(missing_ok=True)
+                    elif item.is_dir():
                         shutil.rmtree(item, ignore_errors=True)
                     else:
                         item.unlink(missing_ok=True)

@@ -79,6 +79,10 @@ class ProcessManager:
         proc: asyncio.subprocess.Process | None = None
         stdout = b""
         stderr = b""
+        captured: dict[str, bytearray] = {
+            "stdout": bytearray(),
+            "stderr": bytearray(),
+        }
         reason: str | None = None
         controller.monitor.start()
         try:
@@ -88,12 +92,23 @@ class ProcessManager:
                 proc = await asyncio.create_subprocess_exec(command[0], *command[1:], stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, cwd=str(cwd) if cwd else None, env=controller.sanitize_env(env), **extra_kwargs)
             self._active_processes.add(proc)
             try:
-                stdout, stderr, output_limited = await asyncio.wait_for(self._collect_output(proc, policy.max_output_bytes, output_callback), timeout=policy.wall_time_seconds)
+                stdout, stderr, output_limited = await asyncio.wait_for(
+                    self._collect_output(
+                        proc,
+                        policy.max_output_bytes,
+                        output_callback,
+                        captured,
+                    ),
+                    timeout=policy.wall_time_seconds,
+                )
                 if output_limited:
                     reason = "output_limit"
             except TimeoutError:
                 reason = "timeout"
                 await self._terminate_tree(proc, policy.termination_grace_seconds)
+                remaining_stdout, remaining_stderr = await self._drain_output(proc)
+                stdout = bytes(captured["stdout"]) + remaining_stdout
+                stderr = bytes(captured["stderr"]) + remaining_stderr
                 stderr += b"\nProcess execution timed out."
             except asyncio.CancelledError:
                 reason = "cancelled"
@@ -123,8 +138,8 @@ class ProcessManager:
                 clean_stderr += marker
         return ProcessResult(cmd_str, exit_code, clean_stdout, clean_stderr, metrics.elapsed_ms, reason == "timeout", stdout_truncated or stderr_truncated or reason == "output_limit", proc.pid if proc else None, metrics=metrics, termination_reason=reason)
 
-    async def _collect_output(self, proc: asyncio.subprocess.Process, max_bytes: int, output_callback: typing.Callable[[str, bytes], typing.Awaitable[None]] | None = None) -> tuple[bytes, bytes, bool]:
-        chunks: dict[str, list[bytes]] = {"stdout": [], "stderr": []}
+    async def _collect_output(self, proc: asyncio.subprocess.Process, max_bytes: int, output_callback: typing.Callable[[str, bytes], typing.Awaitable[None]] | None = None, captured: dict[str, bytearray] | None = None) -> tuple[bytes, bytes, bool]:
+        chunks = captured or {"stdout": bytearray(), "stderr": bytearray()}
         total = 0
         exceeded = False
         lock = asyncio.Lock()
@@ -144,7 +159,7 @@ class ProcessManager:
                     if remaining <= 0:
                         exceeded = True
                     else:
-                        chunks[name].append(data[:remaining])
+                        chunks[name].extend(data[:remaining])
                         total += min(len(data), remaining)
                         exceeded = len(data) > remaining
                 if exceeded:
@@ -153,7 +168,25 @@ class ProcessManager:
 
         await asyncio.gather(read_stream(proc.stdout, "stdout"), read_stream(proc.stderr, "stderr"))
         await proc.wait()
-        return b"".join(chunks["stdout"]), b"".join(chunks["stderr"]), exceeded
+        return bytes(chunks["stdout"]), bytes(chunks["stderr"]), exceeded
+
+    @staticmethod
+    async def _drain_output(
+        proc: asyncio.subprocess.Process,
+    ) -> tuple[bytes, bytes]:
+        """Drain bytes emitted while a timed-out process is being terminated."""
+
+        async def read(stream: asyncio.StreamReader | None) -> bytes:
+            if stream is None:
+                return b""
+            try:
+                # Descendants can inherit a pipe after the direct child exits;
+                # never let diagnostic draining defeat the sandbox deadline.
+                return await asyncio.wait_for(stream.read(), timeout=0.5)
+            except TimeoutError:
+                return b""
+
+        return await asyncio.gather(read(proc.stdout), read(proc.stderr))
 
     @staticmethod
     def _truncate(content: bytes, max_bytes: int) -> tuple[str, bool]:
