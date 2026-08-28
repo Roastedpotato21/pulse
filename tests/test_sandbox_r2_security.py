@@ -344,6 +344,7 @@ def test_docker_overlay_is_exported_before_container_exit(tmp_path: Path):
     assert ".pulse-export-complete" in wrapper_text
 
 
+@pytest.mark.docker
 @pytest.mark.anyio
 async def test_docker_autocommit_uses_staged_changes(tmp_path: Path):
     """Verify that api.py actually commits the overlay (Finding #5 fix)."""

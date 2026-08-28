@@ -631,6 +631,7 @@ def test_windows_toctou_mitigation(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     assert "File identity changed" in str(exc_info.value)
     assert "TOCTOU" in str(exc_info.value)
 
+@pytest.mark.docker
 @pytest.mark.anyio
 async def test_container_overlay_extraction(tmp_path: Path):
     """Verify that writes to /workspace-overlay are successfully extracted to CoW."""
@@ -715,12 +716,12 @@ async def test_docker_initialization_failure_no_fallback(tmp_path: Path, monkeyp
 
 @pytest.mark.anyio
 async def test_remote_backend_available_selection(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """Verify remote backend is selected if Docker is unavailable but remote is configured."""
+    """Verify configured remote execution is preferred over local Docker."""
     from pulse.sandbox.backend.docker import DockerBackend
     from pulse.sandbox.backend.remote import RemoteSandboxBackend
     
     async def mock_docker_available(self):
-        return False
+        return True
     monkeypatch.setattr(DockerBackend, "is_available", mock_docker_available)
     
     async def mock_remote_available(self):
@@ -732,6 +733,7 @@ async def test_remote_backend_available_selection(tmp_path: Path, monkeypatch: p
     monkeypatch.setattr(RemoteSandboxBackend, "is_available", mock_remote_available)
     monkeypatch.setattr(RemoteSandboxBackend, "reconcile", mock_reconcile)
     monkeypatch.setenv("PULSE_REMOTE_URL", "wss://example.com/ws")
+    monkeypatch.setenv("PULSE_REMOTE_TOKEN", "x" * 32)
     
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -740,6 +742,38 @@ async def test_remote_backend_available_selection(tmp_path: Path, monkeypatch: p
     await sandbox.initialize()
     
     assert isinstance(sandbox.backend, RemoteSandboxBackend)
+
+
+@pytest.mark.anyio
+async def test_local_container_fallback_when_remote_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A configured but unreachable remote falls back only to secure isolation."""
+    from pulse.sandbox.backend.docker import DockerBackend
+    from pulse.sandbox.backend.remote import RemoteSandboxBackend
+
+    async def mock_remote_available(self):
+        return False
+
+    async def mock_docker_available(self):
+        self._engine = "docker"
+        return True
+
+    async def mock_reconcile(self):
+        return None
+
+    monkeypatch.setattr(RemoteSandboxBackend, "is_available", mock_remote_available)
+    monkeypatch.setattr(DockerBackend, "is_available", mock_docker_available)
+    monkeypatch.setattr(DockerBackend, "reconcile", mock_reconcile)
+    monkeypatch.setenv("PULSE_REMOTE_URL", "wss://example.com/ws")
+    monkeypatch.setenv("PULSE_REMOTE_TOKEN", "x" * 32)
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    sandbox = Sandbox(workspace)
+    await sandbox.initialize()
+
+    assert isinstance(sandbox.backend, DockerBackend)
 
 
 @pytest.mark.anyio
@@ -759,7 +793,7 @@ async def test_no_secure_backend_fails_closed(tmp_path: Path, monkeypatch: pytes
         await sandbox.initialize()
     
     msg = str(exc_info.value)
-    assert "Docker and Remote are missing" in msg
+    assert "remote and Docker/Podman are missing" in msg
     assert "unsafe host fallback is disabled" in msg
 
 

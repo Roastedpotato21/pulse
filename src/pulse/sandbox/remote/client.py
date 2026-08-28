@@ -80,6 +80,8 @@ class RemoteClient(RemoteSandboxClient):
             additional_headers=headers,
             ping_interval=20,
             ping_timeout=20,
+            open_timeout=5,
+            close_timeout=5,
             ssl=ssl_context,
         )
         self._listener_task = asyncio.create_task(self._listen())

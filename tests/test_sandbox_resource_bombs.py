@@ -11,6 +11,7 @@ from pulse.sandbox.policy import ActionType, PolicyDecision, SandboxPolicy
 from pulse.sandbox.resources import ResourceLimits
 
 
+@pytest.mark.docker
 @pytest.mark.anyio
 async def test_memory_exhaustion_bomb() -> None:
     """Phase 8: Hard Memory Enforcement prevents OOM cascading."""
@@ -39,6 +40,7 @@ async def test_memory_exhaustion_bomb() -> None:
         assert not result.timed_out  # It should die from OOM, not timeout
         
 
+@pytest.mark.docker
 @pytest.mark.anyio
 async def test_storage_exhaustion_bomb() -> None:
     """Phase 7: Disk/Storage Isolation limits prevent disk exhaustion.

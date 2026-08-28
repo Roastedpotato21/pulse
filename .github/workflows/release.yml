@@ -36,7 +36,7 @@ jobs:
       - run: uv run ruff check src tests scripts
       - run: uv run mypy
       - run: >-
-          uv run pytest tests/ -k "not sandbox"
+          uv run pytest tests/ -m "not docker"
           --cov=pulse --cov-report=term-missing --cov-fail-under=54
       - run: uv run python scripts/run_release_evals.py evals/release-v1.json release-metadata/eval-report.json
       - run: uv run pip-audit --progress-spinner off
@@ -121,9 +121,6 @@ jobs:
       - run: docker info
       - run: docker pull python:3.11-slim
       - run: docker pull alpine:3.22
-      - run: >-
-          uv run pytest tests/ -k sandbox
-          --junitxml=release-metadata/docker-full.xml
       - run: uv run python scripts/run_docker_release_tests.py release-metadata/docker-release.xml
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()

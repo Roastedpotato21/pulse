@@ -93,6 +93,7 @@ def test_network_policy_dns_rebinding_protection(monkeypatch):
     assert allow_policy.validate_destination("malicious.com", 80, Protocol.TCP) is False
 
 
+@pytest.mark.docker
 @pytest.mark.anyio
 async def test_sandbox_network_deny_all(tmp_path: Path):
     """Verify DENY_ALL actually blocks external network access."""
@@ -124,6 +125,7 @@ async def test_sandbox_network_deny_all(tmp_path: Path):
     assert result.stderr
 
 
+@pytest.mark.docker
 @pytest.mark.anyio
 async def test_sandbox_network_localhost_only(tmp_path: Path):
     """Verify LOCALHOST_ONLY allows internal container loopback but blocks external."""

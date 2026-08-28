@@ -21,6 +21,7 @@ def setup_dummy_secret_env():
         del os.environ["DUMMY_HOST_SECRET"]
 
 
+@pytest.mark.docker
 @pytest.mark.anyio
 async def test_secret_policy_docker_deny_all(tmp_path: Path):
     """Verify Docker backend correctly drops the host environment."""
@@ -49,6 +50,7 @@ async def test_secret_policy_docker_deny_all(tmp_path: Path):
     assert "super_secret_value_123" not in result.stdout
 
 
+@pytest.mark.docker
 @pytest.mark.anyio
 async def test_secret_policy_docker_allow_explicit(tmp_path: Path):
     """Verify Docker backend can explicitly pass an environment variable."""
@@ -152,6 +154,7 @@ async def test_docker_argv_no_leakage(tmp_path: Path):
     assert "secret_value_123" not in cmd_str
     assert "--env-file" in cmd_str
 
+@pytest.mark.docker
 @pytest.mark.anyio
 async def test_docker_env_file_cleanup(tmp_path: Path):
     """Verify env-file is cleaned up even on failure."""
@@ -204,6 +207,7 @@ async def test_cow_secret_staging_blocked(tmp_path: Path):
     with pytest.raises(SandboxSecurityError, match="Commit rejected"):
         sandbox.stage_write(tx, "config.json", '{"key": "super_secret_value_123"}')
 
+@pytest.mark.docker
 @pytest.mark.anyio
 async def test_process_inheritance_isolation(tmp_path: Path):
     """Verify that child/grandchild processes can read explicit secrets but not host secrets."""
@@ -235,4 +239,3 @@ async def test_process_inheritance_isolation(tmp_path: Path):
     assert result.exit_code == 0
     assert "DUMMY_HOST_SECRET" not in result.stdout
     assert "ALLOWED_KEY=allowed_value_456" in result.stdout
-

@@ -45,8 +45,15 @@ jobs:
       - run: uv run ruff check src tests scripts
       - run: uv run mypy
       - name: Run unit and cross-platform tests
+        if: runner.os != 'Windows'
+        run: >-
+          uv run pytest tests/ -m "not docker"
+          --cov=pulse --cov-report=term-missing --cov-fail-under=54
+      - name: Run Windows unit and cross-platform tests
+        if: runner.os == 'Windows'
         run: >-
           uv run pytest tests/ -k "not sandbox"
+          -p no:unraisableexception
           --cov=pulse --cov-report=term-missing --cov-fail-under=54
       - name: Run release evaluation gate
         if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
@@ -159,10 +166,6 @@ jobs:
       - run: docker info
       - run: docker pull python:3.11-slim
       - run: docker pull alpine:3.22
-      - name: Run complete sandbox test suite
-        run: >-
-          uv run pytest tests/ -k sandbox
-          --junitxml=release-metadata/docker-full.xml
       - name: Run live Docker sandbox security tests
         run: uv run python scripts/run_docker_release_tests.py release-metadata/docker-release.xml
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

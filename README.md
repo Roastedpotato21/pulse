@@ -1,387 +1,139 @@
 # Pulse
 
-**Pulse** is a permissioned coding-agent CLI written in Python and managed with `uv`. It combines repository intelligence, durable planning, safety-gated execution, episodic memory, cost tracking, and multi-provider AI support. Version 0.1.0 is an alpha local single-user release; remote workers and the VS Code client remain evaluation-only.
+Pulse is a permissioned coding-agent CLI for working on software repositories.
+It combines repository-aware planning, durable task state, explicit mutation
+controls, sandboxed command execution, provider routing, audit trails, and cost
+tracking in one Python package.
 
-## Setup
+> **Public beta — 0.1.0:** Pulse is supported for controlled, local,
+> single-user use. The remote worker and VS Code extension are included for
+> evaluation and development, but they are not supported as multi-tenant or
+> unattended production services.
 
-1. Copy `.env.example` to `.env`.
-2. Add your API keys (`GEMINI_API_KEY`, `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GROQ_API_KEY`, or `DEEPSEEK_API_KEY`).
-3. Install and sync:
+## Requirements
 
-```powershell
-uv sync
-```
+- Python 3.11, 3.12, or 3.13
+- An API key for the model provider you choose
+- Docker or Podman for local isolated execution, or access to a configured
+  Pulse remote worker
 
-4. Install the local development CLI:
+## Install
 
-```powershell
-uv tool install --editable .
-```
+Install the first beta from PyPI:
 
-After a registry release, install the reviewed distribution with:
-
-```powershell
+```bash
 uv tool install pulse-coding-agent==0.1.0
 ```
 
-5. Select your AI provider and model using the interactive model manager:
+Alternatively, use `pipx install pulse-coding-agent==0.1.0` or install it in a
+dedicated virtual environment with `pip`.
 
-```powershell
+## Quick start
+
+Run these commands from the repository you want Pulse to work on:
+
+```bash
 pulse model
+pulse doctor --production --target local
+pulse ask "Explain this repository and identify the highest-risk missing test"
 ```
 
-6. Check the setup:
+`pulse model` guides provider and model configuration. Provider credentials can
+also be supplied through environment variables such as `OPENAI_API_KEY`,
+`ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, or `OPENROUTER_API_KEY`. Do not commit a
+populated `.env` file.
 
-```powershell
-pulse doctor
+To run commands without installing Docker on the client workstation, configure
+a remote worker:
+
+```text
+PULSE_REMOTE_URL=wss://sandbox.example.com
+PULSE_REMOTE_TOKEN=<random token of at least 32 characters>
+PULSE_TLS_CERT=/absolute/path/to/client.crt
+PULSE_TLS_KEY=/absolute/path/to/client.key
+PULSE_TLS_CA=/absolute/path/to/ca.crt
 ```
 
-Ask your first question:
+When those variables are set, Pulse tries the remote sandbox first and uses a
+local Docker/Podman engine only as a secure fallback. The remote worker host
+still requires Docker or Podman; execution never silently falls back to the
+client host.
 
-```powershell
-pulse ask "What files are in this project?"
+Before allowing mutations or shell execution, review the proposed operation and
+its permission prompt. Treat model output, tool arguments, and repository
+content as untrusted input.
+
+## What the beta includes
+
+- Repository indexing and context-aware conversations
+- Durable plans, tasks, sessions, episodic memory, and recovery state
+- Permission-gated file mutations with transactional rollback
+- Host, Docker, Podman, and authenticated remote sandbox backends
+- Filesystem, network, resource, timeout, and secret-redaction policies
+- Multi-provider model routing and usage/cost accounting
+- Loopback JSON-RPC integration through `pulse-rpc` or `pulse serve`
+- Production preflight checks, structured audit events, and correlation IDs
+
+The package installs three entry points:
+
+```text
+pulse          Interactive CLI
+pulse-rpc      Loopback JSON-RPC server
+pulse-remote   Evaluation-only remote sandbox worker
 ```
 
----
+Use `pulse --help` for the current command surface and command-specific help.
 
-## AI Provider & Model Management
+## Supported boundary
 
-Pulse supports **6 AI Providers** as a single-active-model agent with rich model metadata (Speed, Context Length, Best For recommendations):
+The 0.1.0 beta supports the local CLI and loopback RPC server for one trusted
+user on one workstation. Pulse does not claim a security boundary between
+mutually untrusted tenants. Do not expose `pulse-rpc` or `pulse-remote` directly
+to the public internet.
 
-| Provider | Environment Variable | Recommended Models | Speed | Context | Best For |
-|---|---|---|---|---|---|
-| **Google Gemini** | `GEMINI_API_KEY` | `gemini-2.0-flash`<br>`gemini-1.5-pro` | Fast<br>High Quality | 1M<br>2M | General & Fast Coding<br>Reasoning & Deep Analysis |
-| **OpenRouter** | `OPENROUTER_API_KEY` | `qwen/qwen3-coder`<br>`anthropic/claude-3.5-sonnet`<br>`deepseek/deepseek-r1` | Balanced<br>High Quality<br>High Quality | 128k<br>200k<br>164k | Advanced Coding & Refactoring<br>Architecture & Technical Writing<br>Complex Reasoning & STEM |
-| **OpenAI** | `OPENAI_API_KEY` | `gpt-4o`<br>`gpt-4o-mini`<br>`o1`<br>`o3-mini` | High Quality<br>Fast<br>High Quality<br>Fast | 128k<br>128k<br>200k<br>200k | Multimodal, Architecture & Coding<br>Lightweight Code & Fast Chat<br>STEM & Complex Reasoning<br>Fast Technical Reasoning |
-| **Anthropic** | `ANTHROPIC_API_KEY` | `claude-3-5-sonnet-20241022`<br>`claude-3-5-haiku-20241022` | High Quality<br>Fast | 200k<br>200k | State-of-the-Art Coding & Design<br>Rapid Refactoring & Lightweight Tasks |
-| **Groq** | `GROQ_API_KEY` | `llama-3.3-70b-versatile`<br>`llama-3.1-8b-instant` | Ultra-Fast<br>Ultra-Fast | 128k<br>128k | General & Fast Coding<br>Instant Search & Micro-Edits |
-| **DeepSeek** | `DEEPSEEK_API_KEY` | `deepseek-chat`<br>`deepseek-reasoner` | Balanced<br>High Quality | 64k<br>64k | General Assistant & Coding (V3)<br>Chain-of-Thought Reasoning (R1) |
+The remote worker requires authenticated transport, durable configuration, and
+container isolation. It remains evaluation-only until tenant isolation,
+centralized observability, load testing, disaster-recovery exercises, and an
+independent security review are complete. The VS Code extension is source-only
+and is not part of the Python distribution.
 
-### Model Management Commands
+Pulse sends prompts and selected repository context to the configured model
+provider. Data handling therefore also depends on that provider's terms and
+settings. Pulse itself does not include product analytics or telemetry export
+in this beta.
 
-- **Interactive Model Manager**: `pulse model` — Opens interactive provider & model selection with Speed, Context, and Best For metadata.
-- **Show Active Configuration**: `pulse model current` — Displays active provider, model, context length, speed, key status, and config path.
-- **List All Providers & Models**: `pulse model list` — Displays complete catalog of all supported providers and models.
-- **Direct Switch**: `pulse model anthropic claude-3-5-sonnet-20241022` or `pulse model groq llama-3.3-70b-versatile`.
-- **Status Check**: `pulse status` — Displays overall agent status.
+## Development
 
-Your selected active provider and model are permanently stored in `.agent/provider.json`:
-```json
-{
-  "provider": "anthropic",
-  "model": "claude-3-5-sonnet-20241022"
-}
-```
-
----
-
-## Python module layout
-
-| Module | Purpose |
-|---|---|
-| `pulse.auth` | `AuthenticationManager` - Google OAuth 2.0 PKCE, token refresh, session persistence, keyring store |
-| `pulse.cli` | Command line entry point |
-| `pulse.agent` | Single-agent orchestration and context selection |
-| `pulse.orchestration` | `AgentOrchestrator` - intent routing via Repository Intelligence |
-| `pulse.safety` | `SafetyManager`, `RiskLevel` - LOW / MEDIUM / HIGH action risk assessment |
-| `pulse.planner.execution_loop` | `AutonomousLoop` - multi-turn tool execution with checkpointing |
-| `pulse.planner.dag_planner` | `DAGPlanner` - hierarchical DAG decomposition of multi-file features |
-| `pulse.providers` | `ProviderManager`, `BaseProvider`, Gemini, OpenRouter, OpenAI, Anthropic, Groq, DeepSeek providers |
-| `pulse.providers.failover` | `FailoverProvider` - transparent secondary provider fallback |
-| `pulse.telemetry` | `CostTracker`, `TelemetryLogger` - token/cost budgets and structured metrics |
-| `pulse.refactor.impact_analyzer` | `ASTImpactAnalyzer` - AST cross-reference symbol impact analysis |
-| `pulse.episodic` | `EpisodicMemory` - SQLite execution trace storage |
-| `pulse.rule_synthesizer` | `RuleSynthesizer` - auto-generated `.agent/rules` from repeated error patterns |
-| `pulse.provider` | Provider re-exports and `ProviderFactory` backward compatibility |
-| `pulse.repository` | Async incremental repository index and semantic search |
-| `pulse.verification` | Async test-runner detection, diagnostics, and repair/retry |
-| `pulse.git` | Git status, diff analysis, and commit suggestions |
-| `pulse.memory` | SQLite long-term context, preferences, and task memory |
-| `pulse.agent_manager` | Injectable specialized-agent coordination over durable tasks |
-| `pulse.mutations` | File mutation tracking, snapshots, diffs, and rollback |
-| `pulse.rpc` | JSON-RPC 2.0 WebSocket adapter for IDE clients |
-| `pulse.audit` | Session action log |
-| `pulse.sandbox` | Workspace permission boundary with local Docker and Remote Sandbox execution (`pulse-remote`) |
-| `pulse.config` | Project config, `.agent/provider.json` and `.env` loading |
-| `pulse.tool_registry` | Async Tool interface, permission gates, and concurrent dispatch |
-| `pulse.tools` | Built-in tools: status, doctor, edit, rollback, mutations, verify, git |
-| `pulse.conversations` | `ConversationManager` — SQLite-backed multi-conversation manager with turn history, search, and export |
-
-The public-beta RPC protocol is version `1.x`. Clients may call
-`pulse.protocolVersion` and should send `params.protocol_version`; incompatible
-major versions fail closed. Responses include `pulse_protocol_version`.
-`pulse-rpc` binds only to loopback. See [PRIVACY.md](PRIVACY.md) for local data,
-provider disclosure, retention, and deletion behavior.
-
----
-
-## Commands
-
-### Conversation Management
-
-Pulse supports **multiple named conversations** with full history, search, and export. Each conversation is persisted in SQLite and the last active one is automatically restored when you start `pulse`.
-
-```powershell
-# Start a new conversation (auto-titled from your first message)
-pulse chat new
-pulse chat new --title "Refactoring Sprint"
-
-# List all conversations (highlights the active one)
-pulse chat list
-
-# Resume a previous conversation by ID (or prefix)
-pulse chat switch <ID>
-
-# Rename a conversation
-pulse chat rename <ID> "New Title"
-
-# Delete a conversation
-pulse chat delete <ID>
-
-# Export to Markdown (default) or JSON
-pulse chat export <ID>
-pulse chat export <ID> --format json
-pulse chat export <ID> --output ./my-chat.md
-
-# Search conversations by title or message content
-pulse chat search "authentication"
-```
-
-The active conversation name is shown in the interactive prompt and footer:
-
-```
-pulse [Refactoring Sprint]> What does this function do?
-```
-
-Conversations are stored in `.agent/conversations.sqlite3`.
-
-### All Commands
-
-```
-pulse                               Interactive project chat (restores last conversation)
-pulse ask <question>                Single-shot project question
-pulse chat new [--title T]          Start a new conversation
-pulse chat list                     List all conversations with status
-pulse chat switch <ID>              Resume a conversation by ID or prefix
-pulse chat delete <ID>              Permanently delete a conversation
-pulse chat rename <ID> TITLE        Rename a conversation
-pulse chat export <ID> [--format]   Export conversation to Markdown or JSON
-pulse chat search QUERY             Full-text search across all conversations
-pulse model                         Interactive AI provider & model manager
-pulse model current                 Display active AI provider & model details
-pulse model list                    List all supported AI providers & models
-pulse model [PROVIDER] [MODEL]      Directly select AI provider and model
-pulse status                        Show agent configuration & active provider/model
-pulse doctor [--production]         Check configuration and deployment readiness
-pulse login                         Sign in with Google OAuth (Continue with Google)
-pulse logout                        Sign out and clear stored tokens
-pulse whoami                        Show the currently signed-in user (name, email)
-pulse google-login                  Alias for `pulse login` - opens Google OAuth in browser
-pulse auth-status                   Detailed sign-in status
-
-pulse register <user> <pass>        Register a local account
-pulse edit <file> <content>         Propose a diff, approve or discard
-pulse rollback                      Restore latest approved edit snapshot
-pulse mutations [--last]            Inspect tracked file mutations
-pulse index                         Build / refresh repository index
-pulse search <query>                Lexical-semantic file search
-pulse symbols <file>                List imports, classes, functions for a file
-pulse verify                        Run project test suite
-pulse git                           Branch status, diff, commit suggestion
-pulse memory [--query <text>]       Inspect or set long-term memory
-pulse serve                         Start loopback JSON-RPC WebSocket server
-```
-
----
-
-## Google Authentication
-
-Pulse supports **"Continue with Google"** via Google OAuth 2.0 PKCE flow. Credentials are stored securely in OS keyring and refresh tokens are used to silently renew expired access tokens.
-
-### Setup
-
-1. Go to [Google Cloud Console -> APIs & Credentials](https://console.cloud.google.com/apis/credentials).
-2. Create an OAuth 2.0 Client ID - **Application type: Web application**.
-3. Add `http://localhost:8080` to **Authorized redirect URIs**.
-4. Copy the Client ID and Secret to your `.env`:
-
-```env
-GOOGLE_CLIENT_ID=your_client_id_here
-GOOGLE_CLIENT_SECRET=your_client_secret_here
-GOOGLE_REDIRECT_URI=http://localhost:8080
-```
-
-### Commands
-
-```powershell
-pulse login          # Open Google sign-in in your browser
-pulse logout         # Sign out and clear stored tokens
-pulse whoami         # Show your name, email, and username
-```
-
----
-
-## Remote Sandbox Execution (`pulse-remote`)
-
-Pulse supports remote code execution via `RemoteSandboxBackend` when local Docker/Podman is unavailable. This ensures untrusted AI code is never executed unsafely on the local host without explicit user opt-in (`unsafe_host_execution=True`).
-
-### Architecture & Features
-- **Strict Isolation**: The remote worker wraps `DockerBackend` on a dedicated remote host, preserving container capabilities (`--cap-drop=ALL`), read-only root filesystems, and memory/CPU limits.
-- **Authenticated Transport**: Secures client-server communication using Bearer token authentication and TLS (`wss://`).
-- **Tenant Namespacing**: Scopes execution records and workspace paths by a hash derived from authentication tokens. This is not yet a complete multi-tenant security boundary.
-- **Copy-on-Write Workspace Sync**: Encapsulates workspace edits in compressed `.tar.gz` overlays with strict symlink and path traversal (ZipSlip) protections.
-
-### Server Setup
-
-The remote worker is evaluation-only in version 0.1.0. For a controlled test
-on an isolated host with Docker running, use a random token of at least 32
-characters and follow `OPERATIONS.md`:
+Clone the repository and create the locked development environment:
 
 ```bash
-export PULSE_REMOTE_HOST="0.0.0.0"
-export PULSE_REMOTE_PORT="8080"
-export PULSE_REMOTE_TOKEN="a-random-value-with-at-least-32-characters"
-export PULSE_REMOTE_WORKSPACE_ROOT="/var/lib/pulse/workspaces"
-export PULSE_REMOTE_DB="/var/lib/pulse/executions.sqlite3"
-export PULSE_TLS_CERT="/etc/pulse/server.crt"
-export PULSE_TLS_KEY="/etc/pulse/server.key"
-export PULSE_TLS_CA="/etc/pulse/ca.crt"
-
-# Run the remote server daemon
-pulse-remote
+uv sync --locked
+uv run pulse --help
 ```
 
-### Client Configuration
-
-Configure Pulse on local machines to delegate isolated execution to the remote server:
+Run the local quality gates:
 
 ```bash
-export PULSE_REMOTE_URL="wss://remote-server:8080"
-export PULSE_REMOTE_TOKEN="a-random-value-with-at-least-32-characters"
-export PULSE_TLS_CERT="/etc/pulse/client.crt"
-export PULSE_TLS_KEY="/etc/pulse/client.key"
-export PULSE_TLS_CA="/etc/pulse/ca.crt"
+uv run ruff check src tests scripts
+uv run mypy
+uv run pytest tests/ -m "not docker" --cov=pulse --cov-report=term-missing --cov-fail-under=54
+uv build
+uv run python scripts/verify_release_artifacts.py dist --expected-version 0.1.0
 ```
 
----
+Docker security tests require a working Docker daemon and are enforced by the
+hosted release workflow. See [OPERATIONS.md](OPERATIONS.md) for release and
+rollback procedures.
 
-## Agent Orchestrator & Safety Management
+## Documentation
 
-`AgentOrchestrator` intercepts every prompt, queries `RepositoryIndex`, and deterministically routes read-only or symbol-search intents directly to tools. Complex intents are forwarded to the LLM. `SafetyManager` categorises every action as `LOW` (read), `MEDIUM` (edit/test), or `HIGH` (delete/shell), blocking `HIGH` risk actions without explicit user confirmation and writing every decision to the audit log.
+- [Architecture](ARCHITECTURE.md)
+- [Operations and releases](OPERATIONS.md)
+- [Security policy](SECURITY.md)
+- [Sandbox security boundary](src/pulse/sandbox/SECURITY.md)
+- [Privacy policy](PRIVACY.md)
+- [Changelog](CHANGELOG.md)
 
----
-
-## Autonomous Execution Loop
-
-`AutonomousLoop` runs up to a configurable step limit (default **5 turns**). Each turn:
-
-1. Evaluate prompt and execute via `AgentOrchestrator`
-2. Assess action risk via `SafetyManager`
-3. Run test verification via `VerificationEngine`
-4. Record file mutations via `MutationTracker`
-5. Write a JSON checkpoint to `.agent/checkpoints/`
-
-The loop terminates early on success, safety rejection, or reaching the step limit.
-
----
-
-## Hierarchical DAG Planner
-
-`DAGPlanner` decomposes multi-file features into a **Directed Acyclic Graph** of `DAGTaskNode` execution steps. Each node declares:
-- `target_files` - files it creates or modifies
-- `inputs` / `outputs` - data dependencies
-- `dependencies` - which tasks must complete first
-
-`get_execution_order()` performs a topological sort and raises `ValueError` on cycle detection.
-
----
-
-## AST Impact Analyzer
-
-`ASTImpactAnalyzer` parses every Python file in the workspace to build a symbol cross-reference map. `get_affected_files(symbol_name)` returns all files that reference the given symbol - enabling safe, scoped refactoring across the entire repository without re-indexing external tools.
-
----
-
-## Episodic Memory & Rule Synthesizer
-
-`EpisodicMemory` records every execution trace (prompt, error, resolution) in a workspace SQLite database (`.agent/episodic-memory.sqlite3`). `search_similar_resolutions(query)` performs fuzzy substring matching to retrieve relevant past fixes before a new repair attempt.
-
-`RuleSynthesizer` scans all traces, counts recurring error patterns, and generates Markdown guideline files under `.agent/rules/` for each pattern that exceeds the configured frequency threshold (default: **2 occurrences**). Generated rules are git-ignored by default and updated on each synthesizer run.
-
----
-
-## Telemetry & Cost Tracking
-
-`CostTracker` records prompt and completion token counts across OpenAI, Gemini, and OpenRouter models, applies per-model pricing, and raises `BudgetExceededError` if session token or dollar limits are exceeded. `TelemetryLogger` appends structured JSONL metric events (step, tool, duration, success) to `.agent/logs/telemetry.jsonl`.
-
-Configure limits in `.env`:
-```
-PULSE_MAX_SESSION_TOKENS=100000
-PULSE_MAX_SESSION_COST=1.00
-```
-
----
-
-## Provider Failover
-
-`FailoverProvider` wraps a primary and secondary `LLMProvider`. If the primary raises any exception (timeout, HTTP error, rate limit), the request is transparently retried against the secondary. Configure via `agent.config.json`:
-```json
-"model": {
-  "provider": "openrouter",
-  "fallbackProvider": "gemini"
-}
-```
-
----
-
-## VS Code Extension
-
-The VS Code extension is not shipped in the 0.1.0 Python artifact. Its WebSocket client can be developed against `ws://127.0.0.1:8765` via `pulse serve`; the legacy stdio client is unsupported and remains a tracked product gap.
-
-### Local Development Setup
-
-1. From the Pulse workspace, run `pulse serve`.
-2. In `vscode-extension/`, run `npm install` then `npm run compile`.
-3. Open `vscode-extension/` in VS Code and press `F5` to launch an Extension Development Host.
-
-Change `pulse.serverUrl` only when you intentionally run Pulse on a different local endpoint.
-
-### Features
-- **Modern Pulse Chat sidebar** — a beautifully crafted Dark Mode UI with glassmorphism; prompt Pulse about the workspace
-- **Simulated Streaming** — real-time event playback showing reasoning, planning, and task progress
-- **Agent Status** — visual indicator of what Pulse is currently doing (idle, thinking, working)
-- **Inline completions** — `PulseInlineEditProvider` sends document context and renders diff suggestions
-- **Diagnostics Code Actions** — "Fix with Pulse" appears on any compiler/linter error; clicking sends the diagnostic to `pulse.explainDiagnostics` and shows the explanation inline
-- **Terminal error debugger** — when a terminal exits with a non-zero code, Pulse prompts to debug; `pulse.debugTerminalError` sends terminal context to the backend for analysis
-- **Command Palette prompts** and workspace verification
-- **Explain and review actions** for the editor selection and Quick Fix menu
-
-### Supported RPC Methods
-
-- **WebSocket path**: `pulse.health`, `pulse.ask`, `pulse.askStream`, `pulse.stream`, `pulse.codeAction`, `pulse.command`
-
-> **Note:** The RPC server deliberately rejects edit and rollback requests because their existing Pulse approval workflow requires an interactive terminal.
-
----
-
-## Repository intelligence
-
-`pulse index` stores a local index at `.agent/repository-index.json`. `pulse search` refreshes the index and ranks filename, symbol, and identifier-term matches. The project agent uses the highest-ranked results as approved context before any LLM call.
-
----
-
-## Long-term memory
-
-Durable context, preferences, and task summaries are stored in `.agent/pulse-memory.sqlite3`. Relevant memories are injected as approved context before planned work. Use `pulse memory --set key value` to save a preference and `pulse memory --query text` to inspect relevant entries.
-
----
-
-## Multi-agent workflow
-
-Non-tool requests run through an async role pipeline: **Planner -> Coding -> Reviewer -> Testing -> response**. Each role is an adapter over the core `Agent`, keeping planning, context, and provider behavior consistent. `AgentManager` is injectable for specialized roles or autonomous workflows.
-
----
-
-## Git intelligence
-
-`pulse git` reports branch, HEAD, change count, additions/deletions, and a conventional commit suggestion from the diff. Git state is captured before and after every approved edit and stored in `mutations.jsonl`.
+To report a vulnerability, use GitHub private vulnerability reporting instead
+of a public issue. General defects and beta feedback belong in the
+[issue tracker](https://github.com/Roastedpotato21/pulse/issues).

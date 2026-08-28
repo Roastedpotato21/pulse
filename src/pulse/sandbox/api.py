@@ -122,10 +122,11 @@ class Sandbox:
         """Select preferred container backend. Must be called before execute_command().
 
         Security behavior:
-            1. Try Docker/Podman. If available, use it.
-            2. If unavailable AND unsafe_host_execution=True: fall back to HostBackend
+            1. If a remote endpoint is configured, try it first.
+            2. Fall back to local Docker/Podman when the remote is unavailable.
+            3. If unavailable AND unsafe_host_execution=True: fall back to HostBackend
                with warnings and audit logging.
-            3. If unavailable AND unsafe_host_execution=False: raise SandboxUnavailableError.
+            4. If unavailable AND unsafe_host_execution=False: raise SandboxUnavailableError.
         """
         if self._backend_explicit and self.backend is not None:
             # Respect the caller's backend selection while still performing
@@ -133,6 +134,43 @@ class Sandbox:
             await self.backend.reconcile()
             self._initialized = True
             return
+
+        # A configured remote is an explicit request to keep untrusted execution
+        # off the user's workstation. A local container engine is the secure
+        # fallback; host execution is never selected implicitly.
+        import logging
+        import os
+
+        from pulse.sandbox.backend.remote import RemoteSandboxBackend
+
+        remote_url = os.environ.get("PULSE_REMOTE_URL", "").strip()
+        remote_token = os.environ.get("PULSE_REMOTE_TOKEN", "").strip()
+        if remote_url or remote_token:
+            try:
+                remote_be = RemoteSandboxBackend(
+                    endpoint_url=remote_url or None,
+                    auth_token=remote_token or None,
+                )
+                if await remote_be.is_available():
+                    self.backend = remote_be
+                    self._initialized = True
+                    await self.backend.reconcile()
+                    self.audit_logger.record(
+                        action="sandbox-init",
+                        target=remote_be.name,
+                        decision="allow",
+                        isolation_level="remote_container",
+                        detail="Secure remote backend initialized from environment configuration.",
+                    )
+                    return
+                logging.getLogger(__name__).warning(
+                    "Configured remote sandbox is incomplete or unavailable; trying a local container engine."
+                )
+            except Exception as error:  # noqa: BLE001
+                logging.getLogger(__name__).warning(
+                    "Remote backend check failed; trying a local container engine: %s",
+                    error,
+                )
 
         try:
             docker_be = DockerBackend()
@@ -150,34 +188,7 @@ class Sandbox:
                 return
         except Exception as e:  # noqa: BLE001
             # Catch initialization/availability errors to avoid silent fallbacks
-            import logging
             logging.getLogger(__name__).warning("Docker backend check failed: %s", e)
-            
-        # Try remote backend if local docker is unavailable
-        try:
-            import os
-
-            from pulse.sandbox.backend.remote import RemoteSandboxBackend
-            
-            remote_url = os.environ.get("PULSE_REMOTE_URL")
-            remote_token = os.environ.get("PULSE_REMOTE_TOKEN")
-            remote_be = RemoteSandboxBackend(endpoint_url=remote_url, auth_token=remote_token)
-            
-            if await remote_be.is_available():
-                self.backend = remote_be
-                self._initialized = True
-                await self.backend.reconcile()
-                self.audit_logger.record(
-                    action="sandbox-init",
-                    target=remote_be.name,
-                    decision="allow",
-                    isolation_level="container",
-                    detail=f"Secure remote backend '{remote_be.name}' initialized via environment config.",
-                )
-                return
-        except Exception as e:  # noqa: BLE001
-            import logging
-            logging.getLogger(__name__).warning("Remote backend check failed: %s", e)
 
         # No container engine available
         if self._unsafe_host_execution:
@@ -210,7 +221,7 @@ class Sandbox:
             detail="No secure backend available and unsafe_host_execution=False.",
         )
         raise SandboxUnavailableError(
-            "No secure backend available (Docker and Remote are missing or unreachable), "
+            "No secure backend available (remote and Docker/Podman are missing or unreachable), "
             "and unsafe host fallback is disabled."
         )
 

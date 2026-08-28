@@ -5,16 +5,17 @@ build-backend = "hatchling.build"
 [project]
 name = "pulse-coding-agent"
 version = "0.1.0"
-description = "Permissioned single-model project agent CLI."
-readme = "README.md"
-requires-python = ">=3.11"
+description = "Permissioned coding-agent CLI with durable planning and isolated execution."
+readme = { file = "README.md", content-type = "text/markdown" }
+requires-python = ">=3.11,<3.14"
 keywords = ["ai", "coding-agent", "developer-tools", "sandbox"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Environment :: Console",
     "Intended Audience :: Developers",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
@@ -34,6 +35,8 @@ dependencies = [
 Homepage = "https://github.com/Roastedpotato21/pulse"
 Repository = "https://github.com/Roastedpotato21/pulse"
 Issues = "https://github.com/Roastedpotato21/pulse/issues"
+Changelog = "https://github.com/Roastedpotato21/pulse/blob/master/CHANGELOG.md"
+Security = "https://github.com/Roastedpotato21/pulse/security/policy"
 
 [project.scripts]
 pulse = "pulse.cli:main"
@@ -54,8 +57,6 @@ include = [
     "/evals",
     "/README.md",
     "/ARCHITECTURE.md",
-    "/ROADMAP.md",
-    "/PRODUCTION_CHECKPOINTS.md",
     "/OPERATIONS.md",
     "/SECURITY.md",
     "/PRIVACY.md",
@@ -71,6 +72,9 @@ pythonpath = ["src", "."]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+markers = [
+    "docker: requires a live Docker daemon and pulled release images",
+]
 filterwarnings = [
     "ignore::pulse.sandbox.api._SecurityWarning",
     "ignore::pulse.sandbox.backend.host._SecurityWarning",

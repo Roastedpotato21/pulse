@@ -14,6 +14,7 @@ from pulse.sandbox.process import ProcessResult
 from pulse.sandbox.resources import ResourceLimits
 
 
+@pytest.mark.docker
 @pytest.mark.anyio
 async def test_reconciliation_cleans_orphaned_containers() -> None:
     """Phase 3/5: Startup reconciliation cleans up orphaned managed containers."""
@@ -61,6 +62,7 @@ async def test_reconciliation_cleans_orphaned_containers() -> None:
         await asyncio.create_subprocess_shell(f"docker rm -f {cid}", stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
 
 
+@pytest.mark.docker
 @pytest.mark.anyio
 async def test_process_timeout_cleanup() -> None:
     """Phase 4/13: Process timeout transitions to FAILED and cleans up properly."""

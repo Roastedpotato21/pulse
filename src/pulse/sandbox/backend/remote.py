@@ -52,7 +52,7 @@ class RemoteSandboxBackend:
             await client.connect()
             await client.disconnect()
             return True
-        except (OSError, ConnectionError):
+        except (OSError, ConnectionError, TimeoutError, ValueError, RuntimeError):
             return False
 
     async def execute(

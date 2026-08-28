@@ -5,7 +5,7 @@ pre-1.0 APIs may change with release notes and migration guidance.
 
 ## [Unreleased]
 
-## [0.1.0] - 2026-08-28
+## [0.1.0] - 2026-08-29
 
 ### Added
 
@@ -13,6 +13,8 @@ pre-1.0 APIs may change with release notes and migration guidance.
   tasks, conversations, mutation tracking, provider routing, and loopback RPC.
 - Docker and authenticated remote sandbox implementations with policy,
   resource, filesystem, network, secret-redaction, and recovery tests.
+- Configured remote execution is preferred on client machines, with local
+  Docker/Podman used as the secure fallback and no implicit host execution.
 - Production doctor, correlation IDs, remote health/readiness endpoints,
   operations/security documentation, and explicit deployment boundaries.
 - Reproducible wheel/source builds, artifact-content verification, clean-install
@@ -21,13 +23,13 @@ pre-1.0 APIs may change with release notes and migration guidance.
   CycloneDX SBOM.
 - Direct application dependencies pinned to the versions exercised by the
   release suite, preventing unreviewed major-version drift at installation.
+- Explicit live-Docker test markers, a single no-skip Docker security gate, and
+  stable Windows pytest teardown behavior in hosted CI.
 
 ### Known limitations
 
 - The supported release boundary is local and single-user.
-- The VS Code extension is not included in the Python release and its legacy
-  stdio transport is unsupported.
-- Hosted tenancy, unified schema migrations/backups, centralized observability,
-  signed SBOM/provenance, and the full evaluation gate remain roadmap work.
-- No project license has been selected; public distribution requires an owner
-  decision before release.
+- Hosted tenancy, centralized observability, and independent multi-tenant
+  security validation are outside the supported beta boundary.
+- The VS Code extension is not included in the Python release; it remains
+  source-only and evaluation-only, and its legacy stdio transport is unsupported.
