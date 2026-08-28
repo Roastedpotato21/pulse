@@ -28,12 +28,12 @@ explicit release action requiring registry credentials.
 | Configuration | Example environment file exists | Partial | Validate deployment configuration without exposing secrets |
 | Release operations | Changelog, checklist, OIDC workflow, production doctor, and rollback runbook exist | Pass for local | Configure external release environments before publishing |
 | API compatibility | CLI/RPC are unversioned and pre-1.0 | Gap | Declare compatibility policy and version RPC envelopes |
-| Type safety | Type hints exist but no type-checking gate | Gap | Introduce a type checker incrementally with a checked-core baseline |
+| Type safety | Strict mypy gates policy, production validation, and evaluation core | Partial | Expand the checked baseline module by module |
 | Observability | Local structured telemetry/cost tracking exists | Partial | Add correlation, OpenTelemetry export, dashboards, and alert thresholds |
 | Evaluation | A versioned deterministic release corpus gates task and policy outcomes | Partial | Add provider E2E and longitudinal quality jobs |
 | Data lifecycle | Multiple SQLite stores exist | Gap | Define schemas, migrations, backup, retention, and corruption recovery |
 | Multi-user hosting | Token auth exists for remote execution | Blocked | Add real identity/authorization, tenant boundaries, rotation, and abuse controls |
-| Supply chain | Lockfile, checksums, source-bound manifest, and CycloneDX SBOM exist | Partial | Add signed provenance attestations and artifact signing |
+| Supply chain | Lockfile, checksums, manifest, CycloneDX SBOM, and signed-attestation workflow exist | Partial | Verify attestations on the published release |
 | Project license | No project license has been selected | Blocked for public distribution | Owner must choose and add a license before public publishing |
 | Documentation accuracy | Supported and evaluation-only boundaries are explicit | Pass | Review claims with every release |
 
@@ -160,12 +160,14 @@ artifact, or operational-document link in the implementing commit.
 ## Release Candidate Evidence — 2026-08-28
 
 - Ruff passes for `src`, `tests`, and `scripts`.
-- Full local suite: 377 passed, 16 environment-dependent tests skipped.
-- CI-equivalent non-sandbox suite: 265 passed with coverage above the
+- Full local suite: 378 passed, 16 environment-dependent tests skipped.
+- CI-equivalent non-sandbox suite: 266 passed with 55.18% coverage against the
   54% ratcheting floor.
 - The versioned seven-category release evaluation passes at 100% task success
   and policy rejection with no provider spend; invalid patches are never
   credited as fixes.
+- Strict mypy checks the policy, production-validation, and evaluation core;
+  the release workflow signs artifact provenance and its CycloneDX SBOM.
 - Actionlint accepts both GitHub workflows; the VS Code TypeScript source
   compiles after `npm ci`.
 - Gitleaks scans the complete repository history with only documented synthetic fixtures

@@ -75,8 +75,18 @@ filterwarnings = [
     "ignore::pulse.sandbox.backend.host._SecurityWarning",
 ]
 
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = [
+    "src/pulse/tool_policy.py",
+    "src/pulse/production.py",
+    "src/pulse/eval",
+]
+
 [dependency-groups]
 dev = [
+    "mypy>=1.18,<2",
     "pip-audit>=2.9.0",
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",

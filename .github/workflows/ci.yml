@@ -49,6 +49,7 @@ jobs:
           python-version: ${{ matrix.python }}
       - run: uv sync --locked
       - run: uv run ruff check src tests scripts
+      - run: uv run mypy
       - name: Run unit and cross-platform tests
         run: >-
           uv run pytest tests/ -k "not sandbox"

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import builtins
 import json
 import uuid
 from collections.abc import Mapping, Sequence
@@ -9,8 +8,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-# expose ``asdict`` to the global namespace for test convenience
-builtins.asdict = asdict
 
 @dataclass(slots=True)
 class TrajectoryStep:

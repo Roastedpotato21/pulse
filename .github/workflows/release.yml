@@ -11,6 +11,10 @@ jobs:
   build-and-verify:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -30,6 +34,7 @@ jobs:
           cache-dependency-path: vscode-extension/package-lock.json
       - run: uv sync --locked
       - run: uv run ruff check src tests scripts
+      - run: uv run mypy
       - run: uv run pytest tests/ --cov=pulse --cov-report=term-missing --cov-fail-under=54
       - run: uv run python scripts/run_release_evals.py evals/release-v1.json release-metadata/eval-report.json
       - run: uv run pip-audit --progress-spinner off
@@ -54,6 +59,15 @@ jobs:
       - run: >-
           uv run python scripts/finalize_sbom.py release-metadata/sbom.cdx.json
           release-metadata/release-manifest.json
+      - name: Sign build provenance
+        uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3
+        with:
+          subject-checksums: release-metadata/SHA256SUMS
+      - name: Sign SBOM attestation
+        uses: actions/attest-sbom@51e74621a501c89df81fc1391c5a8f4cfc9fab2f # v3
+        with:
+          subject-checksums: release-metadata/SHA256SUMS
+          sbom-path: release-metadata/sbom.cdx.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: python-distributions

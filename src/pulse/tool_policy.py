@@ -74,9 +74,9 @@ class ToolSchema:
                 return f"Unexpected argument(s): {', '.join(extras)}."
 
         for name, value in arguments.items():
-            argument = declared.get(name)
-            if argument and not _matches_kind(value, argument.kind):
-                return f"Argument '{name}' must be a {argument.kind.value}."
+            schema_argument = declared.get(name)
+            if schema_argument and not _matches_kind(value, schema_argument.kind):
+                return f"Argument '{name}' must be a {schema_argument.kind.value}."
         return None
 
 
