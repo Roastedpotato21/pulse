@@ -64,15 +64,20 @@ Exit: a clean-machine user can install and start the same reviewed artifact.
 
 ### Phase 2 — Mandatory quality and security gates
 
-- [ ] Make lint, unit tests, package build, wheel smoke test, dependency audit,
+- [x] Make lint, unit tests, package build, wheel smoke test, dependency audit,
   and secret scan mandatory in CI.
-- [ ] Add a release workflow that consumes an already-tested artifact and uses
+- [x] Add a release workflow that consumes an already-tested artifact and uses
   trusted publishing rather than long-lived registry tokens.
-- [ ] Pin CI actions by immutable revisions as part of supply-chain hardening.
-- [ ] Run VS Code compilation/tests or explicitly remove the extension from
+- [x] Pin CI actions by immutable revisions as part of supply-chain hardening.
+- [x] Run VS Code compilation/tests or explicitly remove the extension from
   today's release scope.
-- [ ] Add coverage reporting and establish a ratcheting threshold from the
+- [x] Add coverage reporting and establish a ratcheting threshold from the
   measured baseline.
+
+The initial non-sandbox coverage baseline is 55%; CI fails below 54% to allow
+for platform-specific branch variation. The threshold must only move upward.
+The VS Code source compiles in CI, but the extension artifact remains outside
+today's Python distribution release.
 
 Exit: artifacts cannot be released when correctness or security gates fail.
 

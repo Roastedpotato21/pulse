@@ -49,6 +49,7 @@ packages = ["src/pulse"]
 [tool.hatch.build.targets.sdist]
 include = [
     "/src",
+    "/scripts",
     "/tests",
     "/README.md",
     "/ARCHITECTURE.md",
@@ -61,7 +62,7 @@ include = [
 ]
 
 [tool.pytest.ini_options]
-pythonpath = ["src"]
+pythonpath = ["src", "."]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
@@ -72,7 +73,9 @@ filterwarnings = [
 
 [dependency-groups]
 dev = [
+    "pip-audit>=2.9.0",
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
+    "pytest-cov>=7.0.0",
     "ruff>=0.16.3",
 ]
