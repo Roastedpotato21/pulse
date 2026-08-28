@@ -1,9 +1,25 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
 [project]
-name = "pulse"
+name = "pulse-coding-agent"
 version = "0.1.0"
 description = "Permissioned single-model project agent CLI."
 readme = "README.md"
 requires-python = ">=3.11"
+keywords = ["ai", "coding-agent", "developer-tools", "sandbox"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development",
+]
 dependencies = [
     "httpx>=0.28.0",
     "keyring>=24.0.0",
@@ -14,6 +30,11 @@ dependencies = [
     "websockets>=15.0",
 ]
 
+[project.urls]
+Homepage = "https://github.com/Roastedpotato21/pulse"
+Repository = "https://github.com/Roastedpotato21/pulse"
+Issues = "https://github.com/Roastedpotato21/pulse/issues"
+
 [project.scripts]
 pulse = "pulse.cli:main"
 pulse-rpc = "pulse.rpc:main"
@@ -21,6 +42,23 @@ pulse-remote = "pulse.sandbox.remote.server:main"
 
 [tool.uv]
 package = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pulse"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src",
+    "/tests",
+    "/README.md",
+    "/ARCHITECTURE.md",
+    "/ROADMAP.md",
+    "/PRODUCTION_CHECKPOINTS.md",
+    "/agent.config.json",
+    "/.env.example",
+    "/pyproject.toml",
+    "/uv.lock",
+]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

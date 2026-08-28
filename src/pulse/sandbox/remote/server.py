@@ -5,11 +5,13 @@ Exposes the RemoteWorker over an authenticated WebSocket protocol.
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import datetime
 import http
 import json
 import logging
+import os
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -767,13 +769,26 @@ class RemoteServer:
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO)
-    import os
+    parser = argparse.ArgumentParser(
+        prog="pulse-remote",
+        description="Run Pulse's authenticated remote sandbox worker.",
+    )
+    parser.add_argument(
+        "--host",
+        default=os.environ.get("PULSE_REMOTE_HOST", "127.0.0.1"),
+        help="Bind host (default: PULSE_REMOTE_HOST or 127.0.0.1).",
+    )
+    parser.add_argument(
+        "--port",
+        default=int(os.environ.get("PULSE_REMOTE_PORT", "8080")),
+        type=int,
+        help="Bind port (default: PULSE_REMOTE_PORT or 8080).",
+    )
+    args = parser.parse_args()
 
-    host = os.environ.get("PULSE_REMOTE_HOST", "127.0.0.1")
-    port = int(os.environ.get("PULSE_REMOTE_PORT", "8080"))
+    logging.basicConfig(level=logging.INFO)
     token = os.environ.get("PULSE_REMOTE_TOKEN")
-    server = RemoteServer(host=host, port=port, auth_token=token)
+    server = RemoteServer(host=args.host, port=args.port, auth_token=token)
     try:
         asyncio.run(server.start())
     except KeyboardInterrupt:

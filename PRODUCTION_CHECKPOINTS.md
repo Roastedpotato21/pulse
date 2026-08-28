@@ -10,7 +10,8 @@ multi-tenant hosted service or for unattended execution of untrusted code.
 Those modes remain blocked until the isolation, identity, operations, and
 evaluation checkpoints in later phases are complete.
 
-The deployment target for today is a versioned Python CLI artifact plus its
+The deployment target for today is the `pulse-coding-agent` Python
+distribution (which installs the `pulse` commands) plus its
 local loopback RPC service. Publishing to a package registry is a separate,
 explicit release action requiring registry credentials.
 
@@ -50,13 +51,13 @@ reproducible.
 
 ### Phase 1 — Reproducible distribution
 
-- [ ] Add an explicit PEP 517 build backend and package discovery.
-- [ ] Add project URLs, classifiers, Python compatibility, and typed-package
+- [x] Add an explicit PEP 517 build backend and package discovery.
+- [x] Add project URLs, classifiers, Python compatibility, and typed-package
   metadata where accurate.
-- [ ] Build both wheel and source distribution in a clean environment.
-- [ ] Inspect artifacts for secrets, caches, databases, logs, and unrelated
+- [x] Build both wheel and source distribution in a clean environment.
+- [x] Inspect artifacts for secrets, caches, databases, logs, and unrelated
   binaries.
-- [ ] Install the wheel into an isolated environment and smoke-test all three
+- [x] Install the wheel into an isolated environment and smoke-test all three
   entry points.
 
 Exit: a clean-machine user can install and start the same reviewed artifact.
