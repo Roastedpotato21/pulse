@@ -1,7 +1,9 @@
 [extend]
 useDefault = true
 
-[[allowlists]]
+# Gitleaks 8.24.x (used by the pinned action) expects the singular global
+# table. The plural form was introduced in 8.25.0.
+[allowlist]
 description = "Documented synthetic credentials used by secret-redaction tests"
 regexTarget = "secret"
 regexes = [

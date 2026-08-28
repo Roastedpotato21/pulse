@@ -139,7 +139,13 @@ async def test_setsid_escape_documented(tmp_path: Path):
     workspace.mkdir()
     # We must use HostBackend to test the fallback behavior accurately.
     _policy = SandboxPolicy(default_decisions={"shell": PolicyDecision.ALLOW, "network": PolicyDecision.ALLOW, "secrets": PolicyDecision.ALLOW})
-    sandbox = Sandbox(workspace, backend=HostBackend(), unsafe_host_execution=True, policy=_policy)
+    sandbox = Sandbox(
+        workspace,
+        backend=HostBackend(),
+        unsafe_host_execution=True,
+        policy=_policy,
+        limits=ResourcePolicy(wall_time_seconds=0.5),
+    )
     
     script = """
 import os
@@ -161,10 +167,7 @@ else:
     script_path.write_text(script, encoding="utf-8")
     sandbox.policy = SandboxPolicy(default_decisions={"python": PolicyDecision.ALLOW})
     
-    result = await sandbox.execute_command(
-        [sys.executable, "test.py"],
-        limits=ResourcePolicy(wall_time_seconds=0.5)
-    )
+    result = await sandbox.execute_command([sys.executable, "test.py"])
     
     escaped_pid = None
     for line in result.stdout.splitlines():

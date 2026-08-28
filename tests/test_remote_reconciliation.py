@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import random
 from pathlib import Path
 
 import pytest
@@ -17,15 +16,16 @@ from pulse.task_manager import TaskManager, TaskStatus
 
 @pytest.fixture
 async def reconciliation_server(tmp_path: Path):
-    port = random.randint(20000, 60000)
-    server = RemoteServer(port=port, auth_token="reconcile-token")
+    server = RemoteServer(port=0, auth_token="reconcile-token")
     server.store = RemoteExecutionStore(tmp_path / "executions.sqlite3")
     task = asyncio.create_task(server.start())
-    await asyncio.sleep(0.1)
-    yield server, port
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
+    try:
+        await server.wait_until_ready()
+        yield server, server.port
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
 
 
 def _tenant(token: str) -> str:

@@ -16,7 +16,7 @@ from __future__ import annotations
 import os
 import stat
 import sys
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 from pulse.sandbox.errors import SandboxResourceError, SandboxSecurityError
 
@@ -70,7 +70,19 @@ class PathValidator:
         Raises:
             PathValidationError: If path escapes workspace or violates symlink rules.
         """
-        raw_path = Path(path)
+        raw_value = os.fspath(path)
+        windows_path = PureWindowsPath(raw_value)
+        if sys.platform != "win32" and (
+            windows_path.is_absolute()
+            or windows_path.drive
+            or ".." in windows_path.parts
+        ):
+            raise PathValidationError(
+                "Path is outside workspace boundary",
+                path,
+                "Windows absolute, UNC, or traversal path is forbidden",
+            )
+        raw_path = Path(raw_value)
 
         # 1. Resolve path candidate relative to workspace root if relative
         if not raw_path.is_absolute():

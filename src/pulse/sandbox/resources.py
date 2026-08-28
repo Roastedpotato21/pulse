@@ -8,6 +8,7 @@ while :class:`ResourceController` owns the portable execution lifecycle.
 from __future__ import annotations
 
 import os
+import signal
 import sys
 import time
 from dataclasses import asdict, dataclass, replace
@@ -17,6 +18,15 @@ try:
     import resource
 except ImportError:  # pragma: no cover - Windows has no resource module
     resource = None
+
+_linux_prctl: Any | None = None
+if sys.platform.startswith("linux"):
+    try:  # Resolve libc before forking; importing or loading it in preexec can deadlock.
+        import ctypes
+
+        _linux_prctl = ctypes.CDLL(None, use_errno=True).prctl
+    except (ImportError, OSError, AttributeError):  # pragma: no cover - unusual libc
+        _linux_prctl = None
 
 DANGEROUS_ENV_VARS: frozenset[str] = frozenset({
     "LD_PRELOAD", "LD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES",
@@ -145,31 +155,33 @@ class ResourceController:
                     pass
 
         def preexec() -> None:
-            # P1 Linux process containment parent-death protection
-            if sys.platform.startswith("linux"):
-                import ctypes
-                import signal
-                try:
-                    libc = ctypes.CDLL("libc.so.6")
-                    # PR_SET_PDEATHSIG is 1
-                    res = libc.prctl(1, signal.SIGKILL)
-                    if res != 0:
-                        import sys
-                        print(f"pulse: warning: Failed to set PR_SET_PDEATHSIG (prctl returned {res})", file=sys.stderr)
-                except Exception as e:  # noqa: BLE001
-                    import sys
-                    print(f"pulse: warning: Failed to load libc for PR_SET_PDEATHSIG: {e}", file=sys.stderr)
+            # Keep this callback async-signal-safe in the post-fork child: all
+            # imports and dynamic-library loading happen at module import time.
+            # PR_SET_PDEATHSIG is 1.
+            if _linux_prctl is not None:
+                _linux_prctl(1, signal.SIGKILL)
 
-            if hasattr(resource, "RLIMIT_NPROC"):
-                set_limit(resource.RLIMIT_NPROC, policy.max_processes)
-            if hasattr(resource, "RLIMIT_NOFILE"):
-                set_limit(resource.RLIMIT_NOFILE, policy.max_open_files)
-            if hasattr(resource, "RLIMIT_AS"):
-                set_limit(resource.RLIMIT_AS, policy.memory_bytes)
-            if hasattr(resource, "RLIMIT_CPU") and policy.cpu_time_seconds is not None:
-                set_limit(resource.RLIMIT_CPU, max(1, int(policy.cpu_time_seconds)))
-            if hasattr(resource, "RLIMIT_FSIZE"):
-                set_limit(resource.RLIMIT_FSIZE, policy.disk_bytes)
+            try:
+                if hasattr(resource, "RLIMIT_NPROC"):
+                    set_limit(resource.RLIMIT_NPROC, policy.max_processes)
+                if hasattr(resource, "RLIMIT_NOFILE"):
+                    set_limit(resource.RLIMIT_NOFILE, policy.max_open_files)
+                if hasattr(resource, "RLIMIT_AS"):
+                    set_limit(resource.RLIMIT_AS, policy.memory_bytes)
+                if (
+                    hasattr(resource, "RLIMIT_CPU")
+                    and policy.cpu_time_seconds is not None
+                ):
+                    set_limit(
+                        resource.RLIMIT_CPU, max(1, int(policy.cpu_time_seconds))
+                    )
+                if hasattr(resource, "RLIMIT_FSIZE"):
+                    set_limit(resource.RLIMIT_FSIZE, policy.disk_bytes)
+            except Exception:  # noqa: BLE001 - fail closed at the subprocess boundary
+                # subprocess cannot safely propagate rich exceptions from a
+                # preexec callback. Exit closed if an unexpected limit setup
+                # failure escapes the individual setrlimit guards.
+                os._exit(126)
 
         return preexec
 

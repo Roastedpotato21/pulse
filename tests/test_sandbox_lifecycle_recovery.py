@@ -8,8 +8,9 @@ from tempfile import TemporaryDirectory
 
 import pytest
 
-from pulse.config import SandboxConfig
 from pulse.sandbox.api import Sandbox
+from pulse.sandbox.policy import ActionType, PolicyDecision, SandboxPolicy
+from pulse.sandbox.resources import ResourceLimits
 
 
 @pytest.mark.anyio
@@ -36,10 +37,7 @@ async def test_reconciliation_cleans_orphaned_containers() -> None:
         
         # 2. Trigger Sandbox initialization which runs reconciliation
         with TemporaryDirectory() as directory:
-            from pulse.audit import AuditLog
-            audit = AuditLog(Path(directory) / "audit.jsonl")
-            config = SandboxConfig(workspace_root=Path(directory))
-            sandbox = Sandbox(config, audit_logger=audit)
+            sandbox = Sandbox(Path(directory))
             await sandbox.initialize()
             
         # 3. Verify the orphan container is gone
@@ -59,16 +57,20 @@ async def test_process_timeout_cleanup() -> None:
         pytest.skip("Docker is required for this test.")
 
     with TemporaryDirectory() as directory:
-        from pulse.audit import AuditLog
-        from pulse.sandbox.resources import ResourceLimits
-        
         tmp_path = Path(directory)
-        audit = AuditLog(tmp_path / "audit.jsonl")
-        config = SandboxConfig(workspace_root=tmp_path)
-        sandbox = Sandbox(config, audit_logger=audit)
-        
-        # Override limits directly on the backend to enforce a fast timeout
-        sandbox.limits = ResourceLimits(timeout_seconds=0.5)
+        audit_path = tmp_path / "audit.jsonl"
+        sandbox = Sandbox(
+            tmp_path,
+            limits=ResourceLimits(timeout_seconds=0.5),
+            audit_log_path=audit_path,
+            policy=SandboxPolicy(
+                default_decisions={
+                    ActionType.SHELL.value: PolicyDecision.ALLOW,
+                    ActionType.NETWORK.value: PolicyDecision.ALLOW,
+                    ActionType.SECRETS.value: PolicyDecision.ALLOW,
+                }
+            ),
+        )
         
         result = await sandbox.execute_command("sleep 5")
         
@@ -77,7 +79,7 @@ async def test_process_timeout_cleanup() -> None:
         assert result.exit_code != 0
         
         # Verify audit logs captured the lifecycle transition
-        logs = (tmp_path / "audit.jsonl").read_text(encoding="utf-8")
+        logs = audit_path.read_text(encoding="utf-8")
         assert "CLEANING" in logs
         assert "FINALIZED" in logs
         assert "FAILED" in logs  # Timeout is a failure state

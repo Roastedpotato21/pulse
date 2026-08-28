@@ -6,6 +6,7 @@ import pytest
 
 from pulse.sandbox.backend import ContainerBackend, DockerBackend, HostBackend
 from pulse.sandbox.network import NetworkMode, NetworkPolicy
+from pulse.sandbox.process import ProcessResult
 from pulse.sandbox.resources import ResourceLimits
 
 # ---------------------------------------------------------------------------
@@ -44,6 +45,7 @@ def test_docker_backend_flag_generation(tmp_path: Path):
     assert "--network none" in cmd_str
     assert "--memory 536870912b" in cmd_str
     assert "--pids-limit 32" in cmd_str
+    assert "--label pulse.sandbox.managed=true" in cmd_str
     assert "--env MY_ENV=TEST" in cmd_str
     assert "python:3.11-slim sh -c python --version" in cmd_str
 
@@ -59,6 +61,34 @@ def test_docker_backend_network_enabled(tmp_path: Path):
     cmd_str = " ".join(cmd_args)
     assert "podman run" in cmd_str
     assert "--network none" not in cmd_str
+
+
+@pytest.mark.anyio
+async def test_docker_client_does_not_receive_container_native_limits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class RecordingProcessManager:
+        def __init__(self) -> None:
+            self.kwargs: dict[str, object] = {}
+
+        async def execute(self, *_args: object, **kwargs: object) -> ProcessResult:
+            self.kwargs = kwargs
+            return ProcessResult("docker run", 0, "", "", 1.0)
+
+    manager = RecordingProcessManager()
+    backend = DockerBackend(container_engine="docker", process_manager=manager)  # type: ignore[arg-type]
+
+    async def available() -> bool:
+        return True
+
+    monkeypatch.setattr(backend, "is_available", available)
+    await backend.execute(
+        "echo ok",
+        workspace_root=tmp_path,
+        limits=ResourceLimits(max_memory_bytes=64 * 1024 * 1024),
+    )
+
+    assert manager.kwargs["apply_native_limits"] is False
 
 
 # ---------------------------------------------------------------------------

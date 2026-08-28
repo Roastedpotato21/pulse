@@ -59,7 +59,7 @@ class ProcessManager:
     def active_count(self) -> int:
         return len(self._active_processes)
 
-    async def execute(self, command: str | list[str], cwd: Path | str | None = None, env: dict[str, str] | None = None, limits: ResourceLimits | ResourcePolicy | None = None, output_callback: typing.Callable[[str, bytes], typing.Awaitable[None]] | None = None) -> ProcessResult:
+    async def execute(self, command: str | list[str], cwd: Path | str | None = None, env: dict[str, str] | None = None, limits: ResourceLimits | ResourcePolicy | None = None, output_callback: typing.Callable[[str, bytes], typing.Awaitable[None]] | None = None, *, apply_native_limits: bool = True) -> ProcessResult:
         effective_limits = limits if limits is not None else self.limits
         controller = ResourceController(
             effective_limits
@@ -70,7 +70,9 @@ class ProcessManager:
         cmd_str = command if isinstance(command, str) else " ".join(command)
         extra_kwargs: dict[str, Any] = {"close_fds": True}
         if sys.platform != "win32":
-            extra_kwargs.update(start_new_session=True, preexec_fn=controller.make_preexec_fn())
+            extra_kwargs["start_new_session"] = True
+            if apply_native_limits:
+                extra_kwargs["preexec_fn"] = controller.make_preexec_fn()
         else:
             extra_kwargs["creationflags"] = getattr(__import__("subprocess"), "CREATE_NEW_PROCESS_GROUP", 0)
 

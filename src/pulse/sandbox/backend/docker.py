@@ -232,6 +232,7 @@ class DockerBackend:
 
         if execution_id:
             cmd_args.extend(["--label", f"pulse.sandbox.execution_id={execution_id}"])
+        cmd_args.extend(["--label", "pulse.sandbox.managed=true"])
 
         # Network isolation flag
         if not network_policy or network_policy.mode in (NetworkMode.DENY_ALL, NetworkMode.LOCALHOST_ONLY):
@@ -326,7 +327,16 @@ class DockerBackend:
         )
 
         try:
-            result = await self.process_manager.execute(docker_cmd, cwd=workspace_root, limits=limits, output_callback=output_callback)
+            # The container engine enforces resource limits inside the container.
+            # Applying POSIX rlimits to the Docker/Podman client itself can prevent
+            # the client from starting and does not strengthen containment.
+            result = await self.process_manager.execute(
+                docker_cmd,
+                cwd=workspace_root,
+                limits=limits,
+                output_callback=output_callback,
+                apply_native_limits=False,
+            )
 
             # Extract overlay if container ID was captured
             if cidfile.exists():
@@ -354,7 +364,9 @@ class DockerBackend:
                 timed_out=result.timed_out,
                 truncated=result.truncated,
                 pid=result.pid,
-                overlay_path=overlay_extract_dir if overlay_extract_dir.exists() else None
+                overlay_path=overlay_extract_dir if overlay_extract_dir.exists() else None,
+                metrics=result.metrics,
+                termination_reason=result.termination_reason,
             )
         finally:
             # Always clean temporary files (Finding #3 — cleanup hardening)

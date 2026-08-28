@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from pulse.sandbox.api import Sandbox
+from pulse.sandbox.backend.host import HostBackend
 from pulse.sandbox.errors import SandboxUnsupportedPolicyError
 from pulse.sandbox.network import NetworkMode, NetworkPolicy, NetworkRule, Protocol
 from pulse.sandbox.policy import ActionType, PolicyDecision, SandboxPolicy
@@ -174,7 +175,11 @@ async def test_sandbox_network_unsupported_policies_fail_closed(tmp_path: Path):
     workspace.mkdir()
     
     # Test on HostBackend
-    sandbox = Sandbox(workspace, unsafe_host_execution=True)
+    sandbox = Sandbox(
+        workspace,
+        backend=HostBackend(),
+        unsafe_host_execution=True,
+    )
     await sandbox.initialize()
         
     sandbox.policy = SandboxPolicy(default_decisions={ActionType.SHELL.value: PolicyDecision.ALLOW, ActionType.NETWORK.value: PolicyDecision.ALLOW, ActionType.SECRETS.value: PolicyDecision.ALLOW})

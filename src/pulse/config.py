@@ -18,9 +18,9 @@ class ModelConfig:
 @dataclass(frozen=True)
 class SandboxConfig:
     workspace_root: Path
-    require_permission_for_reads: bool
-    require_permission_for_project_actions: bool
-    allow_writes: bool
+    require_permission_for_reads: bool = True
+    require_permission_for_project_actions: bool = True
+    allow_writes: bool = False
 
 
 @dataclass(frozen=True)

@@ -194,6 +194,7 @@ class RemoteServer:
             database_path or Path(".remote_sandbox.db")
         )
         self._ready = False
+        self._ready_event = asyncio.Event()
         self._active_executions: dict[str, asyncio.Task[Any]] = {}
         # Track tenant for each execution
         self._execution_tenants: dict[str, str] = {}
@@ -281,7 +282,6 @@ class RemoteServer:
             )
 
         cleanup_task = asyncio.create_task(self._ttl_cleanup())
-        self._ready = True
         try:
             async with websockets.serve(
                 self._handle_client,
@@ -292,7 +292,12 @@ class RemoteServer:
                 ping_timeout=20,
                 max_size=1024 * 1024 * 50,  # Enforce 50MB max payload size (R7)
                 ssl=ssl_context,
-            ):
+            ) as websocket_server:
+                sockets = websocket_server.sockets
+                if sockets:
+                    self.port = int(sockets[0].getsockname()[1])
+                self._ready = True
+                self._ready_event.set()
                 scheme = "wss" if ssl_context else "ws"
                 logger.info(
                     "Remote Sandbox Server listening on %s://%s:%s",
@@ -303,9 +308,14 @@ class RemoteServer:
                 await asyncio.Future()  # run forever
         finally:
             self._ready = False
+            self._ready_event.clear()
             cleanup_task.cancel()
             with suppress(asyncio.CancelledError):
                 await cleanup_task
+
+    async def wait_until_ready(self, timeout: float = 5.0) -> None:
+        """Wait until the listening socket is bound and accepting connections."""
+        await asyncio.wait_for(self._ready_event.wait(), timeout=timeout)
 
     async def _handle_client(
         self, websocket: websockets.WebSocketServerProtocol

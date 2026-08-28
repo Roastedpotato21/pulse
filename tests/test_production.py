@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import tomllib
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -16,6 +17,13 @@ from pulse.production import is_secure_remote_token, run_production_checks
 from pulse.sandbox.remote.server import RemoteExecutionStore, RemoteServer
 
 STRONG_TOKEN = "A7mQ2xL9vR4pN8cK6sJ3wH5yB1dF0gZ9uT"
+
+
+def test_pinned_gitleaks_action_uses_compatible_global_allowlist() -> None:
+    config = tomllib.loads(Path(".gitleaks.toml").read_text(encoding="utf-8"))
+    assert "allowlist" in config
+    assert "allowlists" not in config
+    assert STRONG_TOKEN in config["allowlist"]["regexes"]
 
 
 def _config(workspace: Path) -> AgentConfig:
