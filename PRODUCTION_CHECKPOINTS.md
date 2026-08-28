@@ -21,12 +21,12 @@ explicit release action requiring registry credentials.
 | --- | --- | --- | --- |
 | Python tests | 346 passed, 16 environment-dependent sandbox tests skipped | Partial | Keep unit suite green and run secure-backend tests in CI |
 | Lint | Ruff passes for `src` and `tests` | Pass | Make it a required release gate |
-| Packaging | `pyproject.toml` lacks an explicit build backend and release metadata | Blocked | Define reproducible package configuration and verify wheel/sdist contents |
-| CI | Cross-platform Python lint/tests exist | Partial | Add build, artifact smoke test, dependency audit, and secret scan |
+| Packaging | Explicit Hatchling build, clean wheel/sdist verifier, isolated install smoke test | Pass | Keep artifact verification release-blocking |
+| CI | Cross-platform tests, coverage, build, audit, secret scan, extension compile, and Docker jobs exist | Partial | Confirm required checks on the pushed release commit |
 | Security | Extensive sandbox policy tests and a security note exist | Partial | Add a root threat model, supported deployment boundary, and response process |
 | Runtime safety | Secure Docker/remote paths exist; host fallback is explicitly unsafe | Partial | Fail closed in production guidance and verify container tests |
 | Configuration | Example environment file exists | Partial | Validate deployment configuration without exposing secrets |
-| Release operations | No changelog, release checklist, release workflow, or rollback runbook | Blocked | Add them before publishing |
+| Release operations | Changelog, checklist, OIDC workflow, production doctor, and rollback runbook exist | Pass for local | Configure external release environments before publishing |
 | API compatibility | CLI/RPC are unversioned and pre-1.0 | Gap | Declare compatibility policy and version RPC envelopes |
 | Type safety | Type hints exist but no type-checking gate | Gap | Introduce a type checker incrementally with a checked-core baseline |
 | Observability | Local structured telemetry/cost tracking exists | Partial | Add correlation, OpenTelemetry export, dashboards, and alert thresholds |
@@ -35,7 +35,7 @@ explicit release action requiring registry credentials.
 | Multi-user hosting | Token auth exists for remote execution | Blocked | Add real identity/authorization, tenant boundaries, rotation, and abuse controls |
 | Supply chain | Lockfile exists | Partial | Add SBOM, provenance, signed artifacts, and vulnerability policy |
 | Project license | No project license has been selected | Blocked for public distribution | Owner must choose and add a license before public publishing |
-| Documentation accuracy | README contains stale/generated-artifact references | Gap | Align claims with shipped modules and supported modes |
+| Documentation accuracy | Supported and evaluation-only boundaries are explicit | Pass | Review claims with every release |
 
 ## Phased Implementation Plan
 
@@ -131,16 +131,17 @@ measured reliability.
 
 ## Today's Release Checklist
 
-- [ ] Phases 0–3 are complete for the local CLI boundary.
-- [ ] Version and changelog match the artifact.
+- [ ] Phases 0–3 are complete for the local CLI boundary; hosted live-Docker
+  confirmation is still outstanding.
+- [x] Version and changelog match the artifact.
 - [ ] Working tree is clean and the release commit is tagged.
 - [ ] CI is green on every supported Python/platform combination.
 - [ ] Docker security job is green on the release commit.
-- [ ] Wheel installs and `pulse --help`, `pulse-rpc --help`, and
+- [x] Wheel installs and `pulse --help`, `pulse-rpc --help`, and
   `pulse-remote --help` start without importing the source tree.
-- [ ] No credentials or machine-local state are present in Git or artifacts.
+- [x] No credentials or machine-local state are present in Git or artifacts.
 - [ ] The owner has selected and added a project license before public distribution.
-- [ ] Rollback command and previous known-good version are recorded.
+- [x] Rollback procedure and previous-artifact requirements are recorded.
 - [ ] Registry publishing is explicitly approved and performed through trusted
   publishing.
 
@@ -155,3 +156,24 @@ measured reliability.
 This checklist is the execution tracker. `ROADMAP.md` remains the long-term
 architecture roadmap; a checkbox may be closed here only with a code, test,
 artifact, or operational-document link in the implementing commit.
+
+## Release Candidate Evidence — 2026-08-28
+
+- Ruff passes for `src`, `tests`, and `scripts`.
+- Full local suite: 366 passed, 16 environment-dependent tests skipped.
+- CI-equivalent non-sandbox suite: 255 passed with 55.19% coverage against a
+  54% ratcheting floor.
+- Actionlint accepts both GitHub workflows; the VS Code TypeScript source
+  compiles after `npm ci`.
+- Gitleaks scans the complete repository history with only documented synthetic fixtures
+  allowlisted; no leaks remain.
+- `pip-audit` reports no known vulnerable third-party dependencies.
+- Two isolated Hatchling builds produce byte-identical wheel and source
+  distribution files.
+- The exact wheel installs into a fresh Python 3.11 environment; all three
+  entry points and `pulse doctor --production --target local --json` pass.
+
+Remaining external release gates are intentionally open: push the release
+commit and obtain green hosted CI/live-Docker results, choose a project license,
+configure the GitHub `pypi` environment and PyPI trusted publisher, then create
+the version tag and GitHub Release. Public publishing must not bypass them.

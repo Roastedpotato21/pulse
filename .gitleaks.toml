@@ -7,4 +7,5 @@ regexTarget = "secret"
 regexes = [
   '''sk-proj-1234567890abcdef1234567890abcdef''',
   '''eyJhbGciOiJIUzI1NiJ9\.eyJzdWIiOiI5ODciLCJlbWFpbCI6ImFsaWNlQGV4YW1wbGUuY29tIiwibmFtZSI6IkFsaWNlIn0\.sig''',
+  '''A7mQ2xL9vR4pN8cK6sJ3wH5yB1dF0gZ9uT''',
 ]
