@@ -201,6 +201,8 @@ class DockerBackend:
         cidfile: Path | None = None,
         env_file_path: Path | None = None,
         execution_id: str | None = None,
+        overlay_export_path: Path | None = None,
+        export_wrapper_path: Path | None = None,
     ) -> list[str]:
         """Construct the exact `docker run` or `podman run` CLI arguments.
 
@@ -260,6 +262,16 @@ class DockerBackend:
             cmd_args.extend(["--label", f"pulse.sandbox.execution_id={execution_id}"])
         cmd_args.extend(["--label", "pulse.sandbox.managed=true"])
 
+        if overlay_export_path and export_wrapper_path:
+            cmd_args.extend(
+                [
+                    "-v",
+                    f"{overlay_export_path.resolve()}:/workspace-export:rw",
+                    "-v",
+                    f"{export_wrapper_path.resolve()}:/pulse-export-wrapper.sh:ro",
+                ]
+            )
+
         # Network isolation flag
         if not network_policy or network_policy.mode in (NetworkMode.DENY_ALL, NetworkMode.LOCALHOST_ONLY):
             cmd_args.extend(["--network", "none"])
@@ -301,7 +313,13 @@ class DockerBackend:
 
         # Image and target command
         cmd_args.append(self.image)
-        if isinstance(command, str):
+        if overlay_export_path and export_wrapper_path:
+            cmd_args.extend(["sh", "/pulse-export-wrapper.sh"])
+            if isinstance(command, str):
+                cmd_args.extend(["sh", "-c", command])
+            else:
+                cmd_args.extend(command)
+        elif isinstance(command, str):
             cmd_args.extend(["sh", "-c", command])
         else:
             cmd_args.extend(command)
@@ -338,6 +356,13 @@ class DockerBackend:
         cidfile = tmp_base / f"{tx_id}.cid"
         overlay_extract_dir = tmp_base / f"{tx_id}_overlay"
         env_file_path = tmp_base / f"{tx_id}.env"
+        export_wrapper_path = tmp_base / f"{tx_id}_export.sh"
+        overlay_extract_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            overlay_extract_dir.chmod(0o777)
+        except OSError:
+            pass
+        self._write_export_wrapper(export_wrapper_path)
         
         docker_cmd = self.build_docker_cmd(
             command=command,
@@ -350,8 +375,11 @@ class DockerBackend:
             cidfile=cidfile,
             env_file_path=env_file_path,
             execution_id=tx_id,
+            overlay_export_path=overlay_extract_dir,
+            export_wrapper_path=export_wrapper_path,
         )
 
+        completed = False
         try:
             # The container engine enforces resource limits inside the container.
             # Applying POSIX rlimits to the Docker/Podman client itself can prevent
@@ -364,14 +392,11 @@ class DockerBackend:
                 apply_native_limits=False,
             )
 
-            # Extract overlay if container ID was captured
+            # The wrapper exports the tmpfs overlay before the container exits.
+            # Keep the cidfile only for deterministic container cleanup.
             if cidfile.exists():
                 cid = cidfile.read_text(encoding="utf-8").strip()
                 if cid:
-                    overlay_extract_dir.mkdir(parents=True, exist_ok=True)
-                    await self._extract_overlay(engine, cid, overlay_extract_dir)
-
-                    # Remove the container now that we've extracted
                     rm_cmd = [engine, "rm", "-f", cid]
                     rm_proc = await asyncio.create_subprocess_exec(
                         *rm_cmd,
@@ -380,7 +405,19 @@ class DockerBackend:
                     )
                     await rm_proc.wait()
 
+            self._validate_exported_overlay(overlay_extract_dir)
+            export_marker = overlay_extract_dir / ".pulse-export-complete"
+            export_complete = export_marker.is_file()
+            export_marker.unlink(missing_ok=True)
+            if not export_complete and result.exit_code == 0:
+                raise RuntimeError(
+                    "Container command succeeded but its tmpfs overlay was not exported."
+                )
+            if not export_complete:
+                shutil.rmtree(overlay_extract_dir, ignore_errors=True)
+
             # Create a new result with the overlay path
+            completed = True
             return ProcessResult(
                 command=result.command,
                 exit_code=result.exit_code,
@@ -390,7 +427,7 @@ class DockerBackend:
                 timed_out=result.timed_out,
                 truncated=result.truncated,
                 pid=result.pid,
-                overlay_path=overlay_extract_dir if overlay_extract_dir.exists() else None,
+                overlay_path=overlay_extract_dir if export_complete else None,
                 metrics=result.metrics,
                 termination_reason=result.termination_reason,
             )
@@ -406,53 +443,43 @@ class DockerBackend:
                     env_file_path.unlink(missing_ok=True)
                 except OSError:
                     pass
+            export_wrapper_path.unlink(missing_ok=True)
+            if not completed:
+                shutil.rmtree(overlay_extract_dir, ignore_errors=True)
 
     @staticmethod
-    async def _extract_overlay(engine: str, cid: str, dest: Path) -> None:
-        """Securely extract overlay files from container to host.
-
-        Security architecture (Finding #3):
-            - Uses an argv-based ``docker cp``/``podman cp`` invocation on all
-              platforms, avoiding shell pipelines and quoting ambiguity.
-            - Treats extraction errors as execution failures instead of
-              silently returning an empty overlay.
-            - Post-extraction validates that all paths remain within the
-              destination directory.
-        """
-        cp_cmd = [engine, "cp", f"{cid}:/workspace-overlay/.", str(dest)]
-        proc = await asyncio.create_subprocess_exec(
-            *cp_cmd,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE,
+    def _write_export_wrapper(path: Path) -> None:
+        script = (
+            b'#!/bin/sh\n'
+            b'"$@"\n'
+            b'status=$?\n'
+            b'cp -a /workspace-overlay/. /workspace-export/ || exit 125\n'
+            b"find /workspace-export -mindepth 1 -exec chmod a+rwX {} \\; || exit 125\n"
+            b': > /workspace-export/.pulse-export-complete || exit 125\n'
+            b'exit "$status"\n'
         )
-        _, stderr = await proc.communicate()
-        if proc.returncode != 0:
-            detail = stderr.decode("utf-8", errors="replace").strip()
-            raise RuntimeError(
-                f"{engine} overlay extraction failed with exit code "
-                f"{proc.returncode}: {detail or 'no diagnostic output'}"
-            )
+        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o755)
+        try:
+            os.write(fd, script)
+        finally:
+            os.close(fd)
+        try:
+            path.chmod(0o755)
+        except OSError:
+            pass
 
-        # Post-extraction validation: remove any file that escaped dest
+    @staticmethod
+    def _validate_exported_overlay(dest: Path) -> None:
         resolved_dest = dest.resolve()
-        for item in list(dest.rglob("*")):
+        for item in dest.rglob("*"):
+            if item.is_symlink():
+                raise RuntimeError("Container overlay export contains a symbolic link.")
             try:
-                if not item.resolve().is_relative_to(resolved_dest):
-                    if item.is_symlink():
-                        item.unlink(missing_ok=True)
-                    elif item.is_dir():
-                        shutil.rmtree(item, ignore_errors=True)
-                    else:
-                        item.unlink(missing_ok=True)
-            except (OSError, ValueError):
-                # If we can't resolve, remove defensively
-                try:
-                    if item.is_dir():
-                        shutil.rmtree(item, ignore_errors=True)
-                    else:
-                        item.unlink(missing_ok=True)
-                except OSError:
-                    pass
+                item.resolve().relative_to(resolved_dest)
+            except (OSError, ValueError) as exc:
+                raise RuntimeError(
+                    "Container overlay export escaped its destination."
+                ) from exc
 
     async def cleanup(self) -> None:
         await self.process_manager.terminate_all()

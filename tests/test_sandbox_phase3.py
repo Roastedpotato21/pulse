@@ -105,6 +105,15 @@ async def test_docker_client_does_not_receive_container_native_limits(
 
         async def execute(self, *_args: object, **kwargs: object) -> ProcessResult:
             self.kwargs = kwargs
+            command = _args[0]
+            assert isinstance(command, list)
+            export_mount = next(
+                part
+                for part in command
+                if isinstance(part, str) and part.endswith(":/workspace-export:rw")
+            )
+            export_path = Path(export_mount.removesuffix(":/workspace-export:rw"))
+            (export_path / ".pulse-export-complete").touch()
             return ProcessResult("docker run", 0, "", "", 1.0)
 
     manager = RecordingProcessManager()

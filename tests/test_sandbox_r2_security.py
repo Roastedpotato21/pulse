@@ -321,16 +321,27 @@ def test_docker_ulimit_nofile_and_cpu_generated():
     assert "--ulimit cpu=60:60" in cmd_str
 
 
-def test_docker_overlay_extraction_avoids_shell_pipeline():
-    """Verify overlay extraction uses a portable argv-based engine call."""
+def test_docker_overlay_is_exported_before_container_exit(tmp_path: Path):
+    """Verify runtime commands use the in-container tmpfs export wrapper."""
     backend = DockerBackend()
+    export = tmp_path / "export"
+    wrapper = tmp_path / "wrapper.sh"
+    command = backend.build_docker_cmd(
+        "echo ok",
+        tmp_path,
+        overlay_export_path=export,
+        export_wrapper_path=wrapper,
+    )
 
-    import inspect
-    source = inspect.getsource(backend._extract_overlay)
+    command_text = " ".join(str(part) for part in command)
+    assert f"{export.resolve()}:/workspace-export:rw" in command_text
+    assert f"{wrapper.resolve()}:/pulse-export-wrapper.sh:ro" in command_text
+    assert "sh /pulse-export-wrapper.sh sh -c echo ok" in command_text
 
-    assert "create_subprocess_exec" in source
-    assert "create_subprocess_shell" not in source
-    assert "returncode" in source
+    backend._write_export_wrapper(wrapper)
+    wrapper_text = wrapper.read_text(encoding="utf-8")
+    assert "cp -a /workspace-overlay/. /workspace-export/" in wrapper_text
+    assert ".pulse-export-complete" in wrapper_text
 
 
 @pytest.mark.anyio
