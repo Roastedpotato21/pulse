@@ -10,6 +10,7 @@ import json
 import logging
 import uuid
 from collections.abc import AsyncGenerator
+from contextlib import suppress
 from typing import Any
 
 import websockets
@@ -84,12 +85,17 @@ class RemoteClient(RemoteSandboxClient):
         self._listener_task = asyncio.create_task(self._listen())
 
     async def disconnect(self) -> None:
-        """Close the WebSocket connection."""
+        """Close the WebSocket connection and reap its listener task."""
         if self._ws:
             await self._ws.close()
             self._ws = None
         if self._listener_task:
-            self._listener_task.cancel()
+            listener = self._listener_task
+            self._listener_task = None
+            if not listener.done():
+                listener.cancel()
+            with suppress(asyncio.CancelledError):
+                await listener
 
     async def _listen(self) -> None:
         """Background task to listen for messages from the server."""

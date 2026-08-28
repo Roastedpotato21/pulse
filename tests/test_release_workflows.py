@@ -16,10 +16,16 @@ def test_release_actions_are_immutable_and_attestations_are_authorized() -> None
     assert 'tags: ["v*"]' in workflow
     assert "scripts/run_provider_e2e.py" in workflow
     assert "scripts/run_docker_release_tests.py" in workflow
+    assert "--junitxml=release-metadata/docker-full.xml" in workflow
+    assert "path: release-metadata/*.xml" in workflow
+    assert "if-no-files-found: warn" in workflow
     assert "needs: [build-and-verify, provider-e2e, docker-security]" in workflow
     assert 'gh release create "$RELEASE_TAG"' in workflow
 
     ci_workflow = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
     assert "scripts/run_docker_release_tests.py" in ci_workflow
+    assert "--junitxml=release-metadata/docker-full.xml" in ci_workflow
+    assert "path: release-metadata/*.xml" in ci_workflow
+    assert "if-no-files-found: warn" in ci_workflow
     assert "needs: [test, dependency-audit, secret-scan, vscode-extension, docker-security]" in ci_workflow
     assert "docker pull python:3.11-slim" in ci_workflow

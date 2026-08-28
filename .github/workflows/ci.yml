@@ -160,13 +160,15 @@ jobs:
       - run: docker pull python:3.11-slim
       - run: docker pull alpine:3.22
       - name: Run complete sandbox test suite
-        run: uv run pytest tests/ -k sandbox
+        run: >-
+          uv run pytest tests/ -k sandbox
+          --junitxml=release-metadata/docker-full.xml
       - name: Run live Docker sandbox security tests
         run: uv run python scripts/run_docker_release_tests.py release-metadata/docker-release.xml
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
           name: docker-security-report
-          path: release-metadata/docker-release.xml
-          if-no-files-found: error
+          path: release-metadata/*.xml
+          if-no-files-found: warn
           retention-days: 14

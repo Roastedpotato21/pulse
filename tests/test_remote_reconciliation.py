@@ -58,6 +58,7 @@ async def test_remote_status_and_completed_attach_are_execution_scoped(
     assert attached.execution_id == execution_id
     assert attached.stdout == "recovered"
     await client.disconnect()
+    assert client._listener_task is None
 
 
 @pytest.mark.asyncio
@@ -69,6 +70,7 @@ async def test_remote_attach_missing_execution_fails_without_hanging(
     with pytest.raises(RuntimeError, match="NOT_FOUND"):
         await asyncio.wait_for(client.attach("missing-execution"), timeout=1.0)
     await client.disconnect()
+    assert client._listener_task is None
 
 
 @pytest.mark.asyncio
@@ -84,6 +86,7 @@ async def test_remote_attach_unknown_execution_fails_without_hanging(
     with pytest.raises(RuntimeError, match="UNKNOWN"):
         await asyncio.wait_for(client.attach(execution_id), timeout=1.0)
     await client.disconnect()
+    assert client._listener_task is None
 
 
 @pytest.mark.asyncio
