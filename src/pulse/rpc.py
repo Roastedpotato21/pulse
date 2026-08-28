@@ -14,6 +14,18 @@ from pulse.runtime import build_runtime
 from pulse.telemetry import get_correlation_id, set_correlation_id
 from pulse.tool_registry import ToolInvocation
 
+RPC_PROTOCOL_VERSION = "1.0"
+RPC_COMPATIBLE_MAJOR = 1
+RPC_METHODS = (
+    "pulse.ask",
+    "pulse.askStream",
+    "pulse.codeAction",
+    "pulse.command",
+    "pulse.health",
+    "pulse.protocolVersion",
+    "pulse.stream",
+)
+
 
 class PulseRpcEngine(Protocol):
     async def respond_remote(self, prompt: str, context: list[str]) -> str: ...
@@ -32,10 +44,30 @@ class JsonRpcDispatcher:
         method, params = message["method"], message.get("params", {})
         if not isinstance(params, dict):
             return self._error(request_id, -32602, "Parameters must be an object.")
+        requested_protocol = params.get("protocol_version")
+        if requested_protocol is not None and not self._is_compatible_protocol(
+            requested_protocol
+        ):
+            return self._error(
+                request_id,
+                -32001,
+                f"Unsupported Pulse RPC protocol {requested_protocol!r}; "
+                f"server supports {RPC_PROTOCOL_VERSION}.",
+            )
         correlation_id = set_correlation_id(params.get("correlation_id"))
         try:
             if method == "pulse.health":
-                result: Any = {"status": "ok"}
+                result: Any = {
+                    "status": "ok",
+                    "service_version": __version__,
+                    "protocol_version": RPC_PROTOCOL_VERSION,
+                }
+            elif method == "pulse.protocolVersion":
+                result = {
+                    "protocol_version": RPC_PROTOCOL_VERSION,
+                    "compatible_major": RPC_COMPATIBLE_MAJOR,
+                    "methods": list(RPC_METHODS),
+                }
             elif method in {"pulse.ask", "pulse.codeAction"}:
                 prompt = str(params.get("prompt", "")).strip()
                 if not prompt:
@@ -73,7 +105,15 @@ class JsonRpcDispatcher:
             "id": request_id,
             "result": result,
             "correlation_id": correlation_id,
+            "pulse_protocol_version": RPC_PROTOCOL_VERSION,
         }
+
+    @staticmethod
+    def _is_compatible_protocol(value: object) -> bool:
+        if not isinstance(value, str):
+            return False
+        major, separator, minor = value.partition(".")
+        return separator == "." and major.isdigit() and minor.isdigit() and int(major) == RPC_COMPATIBLE_MAJOR
 
     @staticmethod
     def _error(request_id: object, code: int, message: str) -> dict[str, Any]:
@@ -82,6 +122,7 @@ class JsonRpcDispatcher:
             "id": request_id,
             "error": {"code": code, "message": message},
             "correlation_id": get_correlation_id(),
+            "pulse_protocol_version": RPC_PROTOCOL_VERSION,
         }
 
     @staticmethod
@@ -91,6 +132,8 @@ class JsonRpcDispatcher:
 
 async def serve(workspace: str, host: str = "127.0.0.1", port: int = 8765) -> None:
     """Serve Pulse over loopback WebSocket transport using JSON-RPC messages."""
+    if host.strip().lower() not in {"127.0.0.1", "::1", "localhost"}:
+        raise ValueError("pulse-rpc is a local-only service and must bind to loopback.")
     try:
         from websockets.asyncio.server import serve as websocket_serve
     except ImportError as error:

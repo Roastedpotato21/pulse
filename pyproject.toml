@@ -58,6 +58,7 @@ include = [
     "/PRODUCTION_CHECKPOINTS.md",
     "/OPERATIONS.md",
     "/SECURITY.md",
+    "/PRIVACY.md",
     "/CHANGELOG.md",
     "/agent.config.json",
     "/.env.example",

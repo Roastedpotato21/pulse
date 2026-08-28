@@ -9,6 +9,10 @@ is not approved for multi-tenant or unattended production use.
 
 The VS Code extension is source-only in this release. It compiles in CI but is
 not published, and its legacy stdio client is not a supported transport.
+The loopback JSON-RPC compatibility contract is major version `1`; additive
+methods and fields may be introduced within `1.x`, while removals or semantic
+changes require a new major version. Clients should negotiate with
+`pulse.protocolVersion` and reject incompatible major versions.
 
 ## Preflight
 

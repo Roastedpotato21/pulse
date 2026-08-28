@@ -27,7 +27,7 @@ explicit release action requiring registry credentials.
 | Runtime safety | Secure Docker/remote paths exist; host fallback is explicitly unsafe | Partial | Fail closed in production guidance and verify container tests |
 | Configuration | Example environment file exists | Partial | Validate deployment configuration without exposing secrets |
 | Release operations | Changelog, checklist, OIDC workflow, production doctor, and rollback runbook exist | Pass for local | Configure external release environments before publishing |
-| API compatibility | CLI/RPC are unversioned and pre-1.0 | Gap | Declare compatibility policy and version RPC envelopes |
+| API compatibility | JSON-RPC negotiates a documented `1.x` compatibility contract | Pass | Keep breaking changes behind a new protocol major |
 | Type safety | Strict mypy gates policy, production validation, and evaluation core | Partial | Expand the checked baseline module by module |
 | Observability | Local structured telemetry/cost tracking exists | Partial | Add correlation, OpenTelemetry export, dashboards, and alert thresholds |
 | Evaluation | A versioned deterministic release corpus gates task and policy outcomes | Partial | Add provider E2E and longitudinal quality jobs |
@@ -35,7 +35,7 @@ explicit release action requiring registry credentials.
 | Multi-user hosting | Token auth exists for remote execution | Blocked | Add real identity/authorization, tenant boundaries, rotation, and abuse controls |
 | Supply chain | Lockfile, checksums, manifest, CycloneDX SBOM, and signed-attestation workflow exist | Partial | Verify attestations on the published release |
 | Project license | No project license has been selected | Blocked for public distribution | Owner must choose and add a license before public publishing |
-| Documentation accuracy | Supported and evaluation-only boundaries are explicit | Pass | Review claims with every release |
+| Documentation accuracy | Boundaries and public-beta privacy handling are explicit | Pass | Review claims with every release |
 
 ## Phased Implementation Plan
 

@@ -107,6 +107,11 @@ Your selected active provider and model are permanently stored in `.agent/provid
 | `pulse.tools` | Built-in tools: status, doctor, edit, rollback, mutations, verify, git |
 | `pulse.conversations` | `ConversationManager` — SQLite-backed multi-conversation manager with turn history, search, and export |
 
+The public-beta RPC protocol is version `1.x`. Clients may call
+`pulse.protocolVersion` and should send `params.protocol_version`; incompatible
+major versions fail closed. Responses include `pulse_protocol_version`.
+`pulse-rpc` binds only to loopback. See [PRIVACY.md](PRIVACY.md) for local data,
+provider disclosure, retention, and deletion behavior.
 
 ---
 
