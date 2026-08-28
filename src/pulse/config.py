@@ -26,6 +26,7 @@ class SandboxConfig:
 @dataclass(frozen=True)
 class LoggingConfig:
     action_log: Path
+    telemetry_log: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -105,6 +106,10 @@ def load_agent_config(workspace: Path) -> AgentConfig:
         logging=LoggingConfig(
             action_log=(
                 workspace / logging_raw.get("actionLog", ".agent/logs/actions.jsonl")
+            ).resolve(),
+            telemetry_log=(
+                workspace
+                / logging_raw.get("telemetryLog", ".agent/logs/telemetry.jsonl")
             ).resolve(),
         ),
     )

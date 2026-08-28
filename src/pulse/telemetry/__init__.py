@@ -4,7 +4,13 @@ from pulse.telemetry.cost_tracker import (
     ModelPricing,
     UsageRecord,
 )
-from pulse.telemetry.logger import MetricEvent, TelemetryLogger
+from pulse.telemetry.logger import (
+    MetricEvent,
+    TelemetryLogger,
+    correlation_scope,
+    get_correlation_id,
+    set_correlation_id,
+)
 
 __all__ = [
     "BudgetExceededError",
@@ -13,4 +19,7 @@ __all__ = [
     "ModelPricing",
     "TelemetryLogger",
     "UsageRecord",
+    "correlation_scope",
+    "get_correlation_id",
+    "set_correlation_id",
 ]

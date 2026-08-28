@@ -1,6 +1,6 @@
 # Pulse
 
-**Pulse** is an autonomous, multi-capability project agent CLI written in Python and managed with `uv`. It combines repository intelligence, hierarchical planning, safety-gated execution, episodic memory, cost tracking, multi-provider AI support, and VS Code IDE integration.
+**Pulse** is a permissioned coding-agent CLI written in Python and managed with `uv`. It combines repository intelligence, durable planning, safety-gated execution, episodic memory, cost tracking, and multi-provider AI support. Version 0.1.0 is an alpha local single-user release; remote workers and the VS Code client remain evaluation-only.
 
 ## Setup
 
@@ -12,10 +12,16 @@
 uv sync
 ```
 
-4. Install the local CLI:
+4. Install the local development CLI:
 
 ```powershell
 uv tool install --editable .
+```
+
+After a registry release, install the reviewed distribution with:
+
+```powershell
+uv tool install pulse-coding-agent==0.1.0
 ```
 
 5. Select your AI provider and model using the interactive model manager:
@@ -91,7 +97,7 @@ Your selected active provider and model are permanently stored in `.agent/provid
 | `pulse.verification` | Async test-runner detection, diagnostics, and repair/retry |
 | `pulse.git` | Git status, diff analysis, and commit suggestions |
 | `pulse.memory` | SQLite long-term context, preferences, and task memory |
-| `pulse.multi_agent` | Async Planner -> Coder -> Reviewer -> Tester role pipeline |
+| `pulse.agent_manager` | Injectable specialized-agent coordination over durable tasks |
 | `pulse.mutations` | File mutation tracking, snapshots, diffs, and rollback |
 | `pulse.rpc` | JSON-RPC 2.0 WebSocket adapter for IDE clients |
 | `pulse.audit` | Session action log |
@@ -161,7 +167,7 @@ pulse model current                 Display active AI provider & model details
 pulse model list                    List all supported AI providers & models
 pulse model [PROVIDER] [MODEL]      Directly select AI provider and model
 pulse status                        Show agent configuration & active provider/model
-pulse doctor                        Check env, config, and provider readiness
+pulse doctor [--production]         Check configuration and deployment readiness
 pulse login                         Sign in with Google OAuth (Continue with Google)
 pulse logout                        Sign out and clear stored tokens
 pulse whoami                        Show the currently signed-in user (name, email)
@@ -217,17 +223,24 @@ Pulse supports remote code execution via `RemoteSandboxBackend` when local Docke
 ### Architecture & Features
 - **Strict Isolation**: The remote worker wraps `DockerBackend` on a dedicated remote host, preserving container capabilities (`--cap-drop=ALL`), read-only root filesystems, and memory/CPU limits.
 - **Authenticated Transport**: Secures client-server communication using Bearer token authentication and TLS (`wss://`).
-- **Multi-Tenant Isolation**: Scopes executions by tenant ID derived from authentication tokens.
+- **Tenant Namespacing**: Scopes execution records and workspace paths by a hash derived from authentication tokens. This is not yet a complete multi-tenant security boundary.
 - **Copy-on-Write Workspace Sync**: Encapsulates workspace edits in compressed `.tar.gz` overlays with strict symlink and path traversal (ZipSlip) protections.
 
 ### Server Setup
 
-Start the remote worker service on an isolated host with Docker running:
+The remote worker is evaluation-only in version 0.1.0. For a controlled test
+on an isolated host with Docker running, use a random token of at least 32
+characters and follow `OPERATIONS.md`:
 
 ```bash
 export PULSE_REMOTE_HOST="0.0.0.0"
 export PULSE_REMOTE_PORT="8080"
-export PULSE_REMOTE_TOKEN="your-secure-token"
+export PULSE_REMOTE_TOKEN="a-random-value-with-at-least-32-characters"
+export PULSE_REMOTE_WORKSPACE_ROOT="/var/lib/pulse/workspaces"
+export PULSE_REMOTE_DB="/var/lib/pulse/executions.sqlite3"
+export PULSE_TLS_CERT="/etc/pulse/server.crt"
+export PULSE_TLS_KEY="/etc/pulse/server.key"
+export PULSE_TLS_CA="/etc/pulse/ca.crt"
 
 # Run the remote server daemon
 pulse-remote
@@ -239,7 +252,10 @@ Configure Pulse on local machines to delegate isolated execution to the remote s
 
 ```bash
 export PULSE_REMOTE_URL="wss://remote-server:8080"
-export PULSE_REMOTE_TOKEN="your-secure-token"
+export PULSE_REMOTE_TOKEN="a-random-value-with-at-least-32-characters"
+export PULSE_TLS_CERT="/etc/pulse/client.crt"
+export PULSE_TLS_KEY="/etc/pulse/client.key"
+export PULSE_TLS_CA="/etc/pulse/ca.crt"
 ```
 
 ---
@@ -315,7 +331,7 @@ PULSE_MAX_SESSION_COST=1.00
 
 ## VS Code Extension
 
-**Pulse Studio for VS Code** is a modern, feature-rich local client for the Pulse JSON-RPC server. The extension (`vscode-extension/`) supports both **stdio JSON-RPC** (`PulseRpcClient`, no server required) and **WebSocket** (`ws://127.0.0.1:8765` via `pulse serve`).
+The VS Code extension is not shipped in the 0.1.0 Python artifact. Its WebSocket client can be developed against `ws://127.0.0.1:8765` via `pulse serve`; the legacy stdio client is unsupported and remains a tracked product gap.
 
 ### Local Development Setup
 
@@ -335,9 +351,9 @@ Change `pulse.serverUrl` only when you intentionally run Pulse on a different lo
 - **Command Palette prompts** and workspace verification
 - **Explain and review actions** for the editor selection and Quick Fix menu
 
-### RPC Methods
-- **Stdio path**: `plan()`, `executeTool()`, `rollback()`, `getStatus()`, `explainDiagnostics()`, `runCommand()`, `applyPatch()`
-- **WebSocket path**: `pulse.health`, `pulse.askStream`, `pulse.codeAction`, `pulse.command`
+### Supported RPC Methods
+
+- **WebSocket path**: `pulse.health`, `pulse.ask`, `pulse.askStream`, `pulse.stream`, `pulse.codeAction`, `pulse.command`
 
 > **Note:** The RPC server deliberately rejects edit and rollback requests because their existing Pulse approval workflow requires an interactive terminal.
 

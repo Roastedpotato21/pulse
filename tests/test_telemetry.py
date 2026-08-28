@@ -70,6 +70,7 @@ def test_telemetry_logger_event_formatting(tmp_path: Path):
     )
 
     assert event.event_type == "step_execution"
+    assert event.correlation_id
     assert event.step == 1
     assert event.duration_ms == 123.45
     assert event.metadata["tool_name"] == "read_file"
@@ -81,6 +82,7 @@ def test_telemetry_logger_event_formatting(tmp_path: Path):
 
     parsed = json.loads(lines[0])
     assert parsed["event_type"] == "step_execution"
+    assert parsed["correlation_id"] == event.correlation_id
     assert parsed["step"] == 1
     assert parsed["duration_ms"] == 123.45
     assert parsed["metadata"]["file"] == "src/pulse/cli.py"

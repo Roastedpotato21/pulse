@@ -31,6 +31,7 @@ from pulse.session_manager import SessionManager
 from pulse.software_engineer import AutonomousSoftwareEngineer
 from pulse.streaming import StreamingExecutionEngine
 from pulse.task_manager import TaskManager
+from pulse.telemetry import TelemetryLogger
 from pulse.tool_policy import ToolPolicyEngine
 from pulse.tool_registry import ToolInvocation, ToolRegistry
 from pulse.tools import (
@@ -75,12 +76,14 @@ class AgentRuntime:
     streaming_engine: StreamingExecutionEngine
     software_engineer: AutonomousSoftwareEngineer
     auth: AuthenticationManager
+    telemetry: TelemetryLogger
 
 
 def build_runtime(workspace: Path, config: AgentConfig | None = None) -> AgentRuntime:
     resolved_workspace = workspace.resolve()
     resolved_config = config or load_agent_config(resolved_workspace)
     audit = AuditLog(resolved_config.logging.action_log)
+    telemetry = TelemetryLogger(resolved_config.logging.telemetry_log)
     mutations = MutationTracker(resolved_workspace)
     sandbox = ProjectSandbox(resolved_config.sandbox, audit, mutations)
 
@@ -94,8 +97,10 @@ def build_runtime(workspace: Path, config: AgentConfig | None = None) -> AgentRu
     verification = VerificationEngine(resolved_workspace)
     git = GitIntelligence(resolved_workspace)
     memory = LongTermMemory(resolved_workspace)
-    task_manager = TaskManager(resolved_workspace, memory=memory)
-    session_manager = SessionManager(resolved_workspace, task_manager=task_manager)
+    task_manager = TaskManager(resolved_workspace, memory=memory, telemetry=telemetry)
+    session_manager = SessionManager(
+        resolved_workspace, task_manager=task_manager, telemetry=telemetry
+    )
 
     async def check_permission(invocation: ToolInvocation, tool: object) -> bool:
         return sandbox.request_project_action(
@@ -115,6 +120,7 @@ def build_runtime(workspace: Path, config: AgentConfig | None = None) -> AgentRu
             MutationsTool(mutations), EditTool(edits, git), RollbackTool(edits), GitTool(git), MemoryTool(memory),
         ],
         permission_checker=check_permission,
+        telemetry=telemetry,
         policy_engine=ToolPolicyEngine(
             workspace=resolved_workspace,
             allowed_capabilities=tool_capabilities,
@@ -162,6 +168,7 @@ def build_runtime(workspace: Path, config: AgentConfig | None = None) -> AgentRu
         tool_registry=tools,
         reasoning_engine=reasoning_engine,
         task_manager=task_manager,
+        telemetry=telemetry,
         verification_engine=verification,
     )
     software_engineer = AutonomousSoftwareEngineer(
@@ -201,4 +208,5 @@ def build_runtime(workspace: Path, config: AgentConfig | None = None) -> AgentRu
         streaming_engine=streaming_engine,
         software_engineer=software_engineer,
         auth=auth,
+        telemetry=telemetry,
     )

@@ -34,6 +34,7 @@ explicit release action requiring registry credentials.
 | Data lifecycle | Multiple SQLite stores exist | Gap | Define schemas, migrations, backup, retention, and corruption recovery |
 | Multi-user hosting | Token auth exists for remote execution | Blocked | Add real identity/authorization, tenant boundaries, rotation, and abuse controls |
 | Supply chain | Lockfile exists | Partial | Add SBOM, provenance, signed artifacts, and vulnerability policy |
+| Project license | No project license has been selected | Blocked for public distribution | Owner must choose and add a license before public publishing |
 | Documentation accuracy | README contains stale/generated-artifact references | Gap | Align claims with shipped modules and supported modes |
 
 ## Phased Implementation Plan
@@ -83,13 +84,13 @@ Exit: artifacts cannot be released when correctness or security gates fail.
 
 ### Phase 3 — Production configuration and operator safety
 
-- [ ] Add a non-secret `pulse doctor` release check with actionable exit codes.
-- [ ] Validate remote TLS, bearer-token strength, workspace roots, database
+- [x] Add a non-secret `pulse doctor` release check with actionable exit codes.
+- [x] Validate remote TLS, bearer-token strength, workspace roots, database
   paths, resource limits, and disallowed unsafe-host settings.
-- [ ] Add startup health/readiness behavior for the remote worker.
-- [ ] Document backup, restore, migration, token rotation, incident response,
+- [x] Add startup health/readiness behavior for the remote worker.
+- [x] Document backup, restore, migration, token rotation, incident response,
   rollback, and support ownership.
-- [ ] Add structured correlation IDs across task, tool, mutation, and remote
+- [x] Add structured correlation IDs across task, tool, mutation, and remote
   execution records.
 
 Exit: bad production configuration fails before accepting work, and operators
@@ -138,6 +139,7 @@ measured reliability.
 - [ ] Wheel installs and `pulse --help`, `pulse-rpc --help`, and
   `pulse-remote --help` start without importing the source tree.
 - [ ] No credentials or machine-local state are present in Git or artifacts.
+- [ ] The owner has selected and added a project license before public distribution.
 - [ ] Rollback command and previous known-good version are recorded.
 - [ ] Registry publishing is explicitly approved and performed through trusted
   publishing.

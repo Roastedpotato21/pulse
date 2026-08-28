@@ -10,6 +10,7 @@ from typing import Any, Protocol
 
 from pulse.config import load_agent_config
 from pulse.runtime import build_runtime
+from pulse.telemetry import get_correlation_id, set_correlation_id
 from pulse.tool_registry import ToolInvocation
 
 
@@ -30,6 +31,7 @@ class JsonRpcDispatcher:
         method, params = message["method"], message.get("params", {})
         if not isinstance(params, dict):
             return self._error(request_id, -32602, "Parameters must be an object.")
+        correlation_id = set_correlation_id(params.get("correlation_id"))
         try:
             if method == "pulse.health":
                 result: Any = {"status": "ok"}
@@ -65,11 +67,21 @@ class JsonRpcDispatcher:
                 return self._error(request_id, -32601, f"Method not found: {method}")
         except Exception as error:  # Boundary adapter: return protocol errors, never tracebacks.  # noqa: BLE001
             return self._error(request_id, -32000, str(error))
-        return None if request_id is None else {"jsonrpc": "2.0", "id": request_id, "result": result}
+        return None if request_id is None else {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "result": result,
+            "correlation_id": correlation_id,
+        }
 
     @staticmethod
     def _error(request_id: object, code: int, message: str) -> dict[str, Any]:
-        return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
+        return {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "error": {"code": code, "message": message},
+            "correlation_id": get_correlation_id(),
+        }
 
     @staticmethod
     def _json_metadata(metadata: dict[str, Any]) -> dict[str, str]:

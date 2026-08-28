@@ -14,6 +14,7 @@ from pulse.sandbox.remote.client import RemoteClient
 from pulse.sandbox.remote.models import SubmitExecutionRequest
 from pulse.sandbox.resources import ResourceLimits
 from pulse.sandbox.secrets import SecretEnforcementLevel, SecretPolicy
+from pulse.telemetry import get_correlation_id
 
 
 class RemoteSandboxBackend:
@@ -86,6 +87,7 @@ class RemoteSandboxBackend:
             execution_id=exec_id,
             idempotency_key=str(uuid.uuid4()),
             command=command,
+            correlation_id=get_correlation_id(),
             working_directory=rel_cwd,
             env=env,
             resource_policy_dict=res_policy.to_dict() if res_policy else None,

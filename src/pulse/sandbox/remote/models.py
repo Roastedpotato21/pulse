@@ -12,6 +12,7 @@ class SubmitExecutionRequest:
     execution_id: str
     idempotency_key: str
     command: str | list[str]
+    correlation_id: str | None = None
     working_directory: str | None = None
     env: dict[str, str] | None = None
     resource_policy_dict: dict[str, Any] | None = None
@@ -24,6 +25,7 @@ class SubmitExecutionRequest:
             "execution_id": self.execution_id,
             "idempotency_key": self.idempotency_key,
             "command": self.command,
+            "correlation_id": self.correlation_id,
             "working_directory": self.working_directory,
             "env": self.env,
             "resource_policy_dict": self.resource_policy_dict,
@@ -38,6 +40,7 @@ class SubmitExecutionRequest:
             execution_id=data["execution_id"],
             idempotency_key=data["idempotency_key"],
             command=data["command"],
+            correlation_id=data.get("correlation_id"),
             working_directory=data.get("working_directory"),
             env=data.get("env"),
             resource_policy_dict=data.get("resource_policy_dict"),

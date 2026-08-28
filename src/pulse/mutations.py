@@ -11,6 +11,8 @@ from difflib import unified_diff
 from pathlib import Path
 from typing import Self
 
+from pulse.telemetry import get_correlation_id
+
 
 @dataclass(frozen=True)
 class FileSnapshot:
@@ -24,6 +26,7 @@ class MutationEvent:
     """An immutable, rollback-ready record of one workspace file mutation."""
 
     transaction_id: str
+    correlation_id: str
     timestamp: str
     action: str
     file_path: str
@@ -75,7 +78,16 @@ class MutationTracker:
     contain the previous or replacement contents of edited files.
     """
 
-    _IGNORED_PARTS = {".git", ".agent", ".agents", ".venv", "venv", "__pycache__", ".pytest_cache"}  # noqa: RUF012
+    _IGNORED_PARTS = {  # noqa: RUF012
+        ".git",
+        ".agent",
+        ".agents",
+        ".pulse",
+        ".venv",
+        "venv",
+        "__pycache__",
+        ".pytest_cache",
+    }
 
     def __init__(self, workspace: Path, log_path: Path | None = None) -> None:
         self.workspace = workspace.resolve()
@@ -175,6 +187,7 @@ class MutationTracker:
                 if old.before_sha256 == new.after_sha256:
                     replacements[old.file_path] = MutationEvent(
                         transaction_id=transaction_id,
+                        correlation_id=old.correlation_id,
                         timestamp=old.timestamp,
                         action="rename",
                         file_path=f"{old.file_path} -> {new.file_path}",
@@ -197,6 +210,7 @@ class MutationTracker:
         after_text = self._decode(after.content) if after else None
         return MutationEvent(
             transaction_id=transaction_id,
+            correlation_id=get_correlation_id(),
             timestamp=datetime.now(UTC).isoformat(),
             action=action,
             file_path=path,

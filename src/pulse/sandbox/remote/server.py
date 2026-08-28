@@ -8,16 +8,19 @@ from __future__ import annotations
 import argparse
 import asyncio
 import datetime
+import hmac
 import http
 import json
 import logging
 import os
 import sqlite3
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
 import websockets
 
+from pulse.production import is_secure_remote_token
 from pulse.sandbox.remote.models import (
     SubmitExecutionRequest,
     SubmitExecutionResponse,
@@ -41,7 +44,8 @@ def _read_log_entries(path: Path) -> list[str]:
 
 class RemoteExecutionStore:
     def __init__(self, db_path: Path):
-        self.db_path = db_path
+        self.db_path = db_path.resolve()
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._ensure_schema()
 
     def _connect(self) -> sqlite3.Connection:
@@ -56,18 +60,30 @@ class RemoteExecutionStore:
                     execution_id TEXT PRIMARY KEY,
                     tenant_id TEXT NOT NULL,
                     status TEXT NOT NULL,
+                    correlation_id TEXT,
                     result_json TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
             """)
+            columns = {
+                row[1] for row in conn.execute("PRAGMA table_info(executions)").fetchall()
+            }
+            if "correlation_id" not in columns:
+                conn.execute("ALTER TABLE executions ADD COLUMN correlation_id TEXT")
+            conn.execute("PRAGMA user_version = 2")
 
-    def create(self, execution_id: str, tenant_id: str) -> None:
+    def create(
+        self,
+        execution_id: str,
+        tenant_id: str,
+        correlation_id: str | None = None,
+    ) -> None:
         now = datetime.datetime.now(datetime.UTC).isoformat()
         with self._connect() as conn:
             conn.execute(
-                "INSERT OR REPLACE INTO executions (execution_id, tenant_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-                (execution_id, tenant_id, "RUNNING", now, now),
+                "INSERT OR REPLACE INTO executions (execution_id, tenant_id, status, correlation_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (execution_id, tenant_id, "RUNNING", correlation_id, now, now),
             )
 
     def update(
@@ -89,7 +105,7 @@ class RemoteExecutionStore:
     def get(self, execution_id: str, tenant_id: str) -> dict[str, Any] | None:
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT status, result_json, created_at, updated_at FROM executions WHERE execution_id = ? AND tenant_id = ?",
+                "SELECT status, result_json, created_at, updated_at, correlation_id FROM executions WHERE execution_id = ? AND tenant_id = ?",
                 (execution_id, tenant_id),
             ).fetchone()
             if not row:
@@ -99,6 +115,7 @@ class RemoteExecutionStore:
                 "result": json.loads(row[1]) if row[1] else None,
                 "created_at": row[2],
                 "updated_at": row[3],
+                "correlation_id": row[4],
             }
 
     def cleanup_old(self, max_age_hours: int = 1) -> list[tuple[str, str]]:
@@ -140,6 +157,10 @@ class RemoteServer:
         port: int = 8080,
         auth_token: str | None = None,
         max_concurrent_executions: int = 10,
+        workspace_root: Path | None = None,
+        database_path: Path | None = None,
+        retention_hours: int = 24,
+        production_mode: bool = False,
     ) -> None:
         self.host = host
         self.port = port
@@ -148,10 +169,27 @@ class RemoteServer:
             raise ValueError(
                 "PULSE_REMOTE_TOKEN must be configured; insecure default tokens are disabled."
             )
-        self.valid_tokens = set(auth_token.split(","))
+        self.valid_tokens = {token.strip() for token in auth_token.split(",") if token.strip()}
+        if production_mode and any(
+            not is_secure_remote_token(token) for token in self.valid_tokens
+        ):
+            raise ValueError(
+                "Every production PULSE_REMOTE_TOKEN must be random, non-placeholder, "
+                "and at least 32 characters."
+            )
+        if not self.valid_tokens:
+            raise ValueError("PULSE_REMOTE_TOKEN does not contain a usable token.")
+        if not 1 <= max_concurrent_executions <= 128:
+            raise ValueError("max_concurrent_executions must be between 1 and 128.")
+        if not 1 <= retention_hours <= 8760:
+            raise ValueError("retention_hours must be between 1 and 8760.")
         self.max_concurrent_executions = max_concurrent_executions
-        self.worker = RemoteWorker()
-        self.store = RemoteExecutionStore(Path(".remote_sandbox.db"))
+        self.retention_hours = retention_hours
+        self.worker = RemoteWorker(workspace_root)
+        self.store = RemoteExecutionStore(
+            database_path or Path(".remote_sandbox.db")
+        )
+        self._ready = False
         self._active_executions: dict[str, asyncio.Task[Any]] = {}
         # Track tenant for each execution
         self._execution_tenants: dict[str, str] = {}
@@ -164,7 +202,7 @@ class RemoteServer:
         while True:
             await asyncio.sleep(300)
             try:
-                old = self.store.cleanup_old(max_age_hours=1)
+                old = self.store.cleanup_old(max_age_hours=self.retention_hours)
                 for eid, tid in old:
                     self.worker.cleanup_workspace(tid, eid)
             except (OSError, RuntimeError) as e:
@@ -174,6 +212,14 @@ class RemoteServer:
         from websockets.http11 import Response
 
         """Enforce authenticated transport (R3)."""
+        if request.path in {"/healthz", "/readyz"}:
+            ready = request.path == "/healthz" or self._ready
+            status = http.HTTPStatus.OK if ready else http.HTTPStatus.SERVICE_UNAVAILABLE
+            body = json.dumps(
+                {"status": "ok" if ready else "not_ready"}, separators=(",", ":")
+            ).encode("utf-8")
+            return Response(status, status.phrase, websockets.Headers(), body)
+
         auth_header = request.headers.get("Authorization")
         if not auth_header or not auth_header.startswith("Bearer "):
             return Response(
@@ -183,8 +229,8 @@ class RemoteServer:
                 b"Unauthorized",
             )
 
-        token = auth_header.split(" ")[1]
-        if token not in self.valid_tokens:
+        token = auth_header.split(" ", 1)[1]
+        if not any(hmac.compare_digest(token, valid) for valid in self.valid_tokens):
             logger.warning("Unauthorized remote sandbox connection attempt.")
             return Response(
                 http.HTTPStatus.UNAUTHORIZED,
@@ -230,23 +276,32 @@ class RemoteServer:
                 "are strictly required for non-loopback connections."
             )
 
-        asyncio.create_task(self._ttl_cleanup())
-
-        async with websockets.serve(
-            self._handle_client,
-            self.host,
-            self.port,
-            process_request=self._process_request,
-            ping_interval=20,
-            ping_timeout=20,
-            max_size=1024 * 1024 * 50,  # Enforce 50MB max payload size (R7)
-            ssl=ssl_context,
-        ):
-            scheme = "wss" if ssl_context else "ws"
-            logger.info(
-                f"Remote Sandbox Server listening on {scheme}://{self.host}:{self.port}"
-            )
-            await asyncio.Future()  # run forever
+        cleanup_task = asyncio.create_task(self._ttl_cleanup())
+        self._ready = True
+        try:
+            async with websockets.serve(
+                self._handle_client,
+                self.host,
+                self.port,
+                process_request=self._process_request,
+                ping_interval=20,
+                ping_timeout=20,
+                max_size=1024 * 1024 * 50,  # Enforce 50MB max payload size (R7)
+                ssl=ssl_context,
+            ):
+                scheme = "wss" if ssl_context else "ws"
+                logger.info(
+                    "Remote Sandbox Server listening on %s://%s:%s",
+                    scheme,
+                    self.host,
+                    self.port,
+                )
+                await asyncio.Future()  # run forever
+        finally:
+            self._ready = False
+            cleanup_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await cleanup_task
 
     async def _handle_client(
         self, websocket: websockets.WebSocketServerProtocol
@@ -307,7 +362,9 @@ class RemoteServer:
                     attached.discard(ws)
 
             try:
-                self.store.create(req.execution_id, tenant_id)
+                self.store.create(
+                    req.execution_id, tenant_id, correlation_id=req.correlation_id
+                )
                 result = await self.worker.execute_request(
                     req, tenant_id=tenant_id, output_callback=scoped_send_output
                 )
@@ -780,15 +837,74 @@ def main() -> None:
     )
     parser.add_argument(
         "--port",
-        default=int(os.environ.get("PULSE_REMOTE_PORT", "8080")),
+        default=os.environ.get("PULSE_REMOTE_PORT", "8080"),
         type=int,
         help="Bind port (default: PULSE_REMOTE_PORT or 8080).",
+    )
+    parser.add_argument(
+        "--workspace-root",
+        type=Path,
+        default=Path(
+            os.environ.get("PULSE_REMOTE_WORKSPACE_ROOT", ".pulse/remote-workspaces")
+        ),
+        help="Tenant workspace root (default: PULSE_REMOTE_WORKSPACE_ROOT).",
+    )
+    parser.add_argument(
+        "--database",
+        type=Path,
+        default=Path(
+            os.environ.get("PULSE_REMOTE_DB", ".pulse/remote-executions.sqlite3")
+        ),
+        help="Durable execution database (default: PULSE_REMOTE_DB).",
+    )
+    parser.add_argument(
+        "--max-concurrency",
+        type=int,
+        default=os.environ.get("PULSE_REMOTE_MAX_CONCURRENCY", "10"),
+        help="Maximum active executions (1-128).",
+    )
+    parser.add_argument(
+        "--retention-hours",
+        type=int,
+        default=os.environ.get("PULSE_REMOTE_RETENTION_HOURS", "24"),
+        help="Retention for terminal execution records (1-8760 hours).",
+    )
+    parser.add_argument(
+        "--development",
+        action="store_true",
+        help="Allow short development tokens; only appropriate on loopback.",
     )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO)
     token = os.environ.get("PULSE_REMOTE_TOKEN")
-    server = RemoteServer(host=args.host, port=args.port, auth_token=token)
+    if args.development and args.host not in {"127.0.0.1", "localhost", "::1"}:
+        parser.error("--development is restricted to a loopback host")
+    if not args.development:
+        if not args.workspace_root.is_absolute() or not args.database.is_absolute():
+            parser.error(
+                "production remote paths must be absolute; set "
+                "PULSE_REMOTE_WORKSPACE_ROOT and PULSE_REMOTE_DB"
+            )
+        if args.host not in {"127.0.0.1", "localhost", "::1"}:
+            for variable in ("PULSE_TLS_CERT", "PULSE_TLS_KEY", "PULSE_TLS_CA"):
+                value = os.environ.get(variable, "")
+                path = Path(value) if value else None
+                if not path or not path.is_absolute() or not path.is_file():
+                    parser.error(
+                        f"{variable} must reference an existing absolute file "
+                        "for a non-loopback worker"
+                    )
+    server = RemoteServer(
+        host=args.host,
+        port=args.port,
+        auth_token=token,
+        max_concurrent_executions=args.max_concurrency,
+        workspace_root=args.workspace_root,
+        database_path=args.database,
+        retention_hours=args.retention_hours,
+        production_mode=not args.development,
+    )
     try:
         asyncio.run(server.start())
     except KeyboardInterrupt:

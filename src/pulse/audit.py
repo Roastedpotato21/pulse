@@ -5,10 +5,13 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from pulse.telemetry import get_correlation_id
+
 
 @dataclass(frozen=True)
 class AuditEntry:
     timestamp: str
+    correlation_id: str
     action: str
     file: str
     detail: str
@@ -22,6 +25,7 @@ class AuditLog:
     def record(self, action: str, file: str, detail: str) -> None:
         entry = AuditEntry(
             timestamp=datetime.now(UTC).isoformat(),
+            correlation_id=get_correlation_id(),
             action=action,
             file=file,
             detail=detail,

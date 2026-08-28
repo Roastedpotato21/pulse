@@ -20,6 +20,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, ClassVar
 
+from pulse.telemetry import get_correlation_id
+
 logger = logging.getLogger(__name__)
 
 
@@ -593,6 +595,7 @@ class TaskStore:
             (task.id,),
         ).fetchone()[0]
         payload = {
+            "correlation_id": task.metadata.get("correlation_id"),
             "status": task.status.value,
             "progress": task.progress,
             "retries": task.retries,
@@ -1063,6 +1066,8 @@ class TaskManager:
                 goal[:45] + "..." if len(goal) > 45 else goal
             )
 
+            task_metadata = dict(metadata or {})
+            task_metadata.setdefault("correlation_id", get_correlation_id())
             task = Task(
                 id=task_id,
                 title=clean_title,
@@ -1071,7 +1076,7 @@ class TaskManager:
                 status=TaskStatus.PENDING,
                 depends_on=list(depends_on),
                 max_retries=max_retries,
-                metadata=metadata or {},
+                metadata=task_metadata,
             )
             self._tasks[task_id] = task
             self.store.create_task(task)

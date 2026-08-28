@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from pulse.telemetry import get_correlation_id, set_correlation_id
 from pulse.tool_policy import (
     AuthorizationDecision,
     ToolPolicyEngine,
@@ -55,10 +57,12 @@ class ToolRegistry:
         *,
         permission_checker: PermissionChecker | None = None,
         policy_engine: ToolPolicyEngine | None = None,
+        telemetry: Any | None = None,
     ) -> None:
         self._tools: dict[str, Tool] = {}
         self._permission_checker = permission_checker
         self._policy_engine = policy_engine
+        self._telemetry = telemetry
         for tool in tools:
             self.register(tool)
 
@@ -82,14 +86,34 @@ class ToolRegistry:
         tool = self.match(invocation)
         if tool is None:
             return None
+        correlation_id = set_correlation_id(
+            invocation.metadata.get("correlation_id") or get_correlation_id()
+        )
+        started = time.perf_counter()
+        if self._telemetry:
+            self._telemetry.log_event(
+                "tool_started", tool_name=tool.name, correlation_id=correlation_id
+            )
+
+        def finish(result: ToolResult) -> ToolResult:
+            result.metadata.setdefault("correlation_id", correlation_id)
+            if self._telemetry:
+                self._telemetry.log_event(
+                    "tool_completed",
+                    duration_ms=(time.perf_counter() - started) * 1000,
+                    tool_name=tool.name,
+                    error_code=result.metadata.get("error_code"),
+                )
+            return result
+
         schema = getattr(tool, "schema", None)
         if schema:
             validation_error = schema.validate(invocation.arguments)
             if validation_error:
-                return ToolResult(
+                return finish(ToolResult(
                     f"Invalid arguments for {tool.name}: {validation_error}",
                     metadata={"error_code": "invalid_tool_arguments", "validation_error": validation_error},
-                )
+                ))
 
         requires_approval = bool(getattr(tool, "requires_permission", False))
         policy_requires_approval = False
@@ -104,10 +128,10 @@ class ToolRegistry:
             )
             self._policy_engine.record(authorization)
             if authorization.decision == AuthorizationDecision.DENY:
-                return ToolResult(
+                return finish(ToolResult(
                     f"Tool denied for {tool.name}: {authorization.reason}",
                     metadata={"error_code": "tool_policy_denied", "policy_reason": authorization.reason},
-                )
+                ))
             policy_requires_approval = authorization.decision == AuthorizationDecision.ASK
             requires_approval = requires_approval or policy_requires_approval
 
@@ -119,11 +143,20 @@ class ToolRegistry:
             and not await self._permission_checker(invocation, tool)
         )
         if approval_denied:
-            return ToolResult(
+            return finish(ToolResult(
                 f"Permission denied for {tool.name}.",
                 metadata={"permission_denied": True, "error_code": "tool_approval_denied"},
-            )
-        return await tool.execute(invocation)
+            ))
+        try:
+            return finish(await tool.execute(invocation))
+        except Exception:
+            if self._telemetry:
+                self._telemetry.log_event(
+                    "tool_failed",
+                    duration_ms=(time.perf_counter() - started) * 1000,
+                    tool_name=tool.name,
+                )
+            raise
 
     async def execute_many(self, invocations: Iterable[ToolInvocation]) -> list[ToolResult | None]:
         """Independent tools may run concurrently; callers retain input ordering."""

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import io
+import json
 import shutil
 import sys
 from pathlib import Path
@@ -26,6 +27,7 @@ from pulse.conversations import ConversationManager
 from pulse.edits import EditProposal
 from pulse.providers.manager import ProviderManager
 from pulse.runtime import build_runtime
+from pulse.telemetry import set_correlation_id
 from pulse.tool_registry import ToolInvocation
 
 from .cli_ui import (
@@ -57,6 +59,7 @@ from .cli_ui import (
 
 
 def main() -> None:
+    set_correlation_id()
     parser = argparse.ArgumentParser(prog="pulse", description="Permissioned single-model project agent.")
     subparsers = parser.add_subparsers(dest="command")
 
@@ -96,7 +99,18 @@ def main() -> None:
     # ────────────────────────────────────────────────────────────────────────
 
     subparsers.add_parser("status", help="Show agent configuration.")
-    subparsers.add_parser("doctor", help="Check CLI, uv, provider, and project setup.")
+    doctor_parser = subparsers.add_parser(
+        "doctor", help="Check CLI, provider, and production deployment readiness."
+    )
+    doctor_parser.add_argument(
+        "--production", action="store_true", help="Run release-blocking production checks."
+    )
+    doctor_parser.add_argument(
+        "--target", choices=("local", "remote"), default="local"
+    )
+    doctor_parser.add_argument(
+        "--json", action="store_true", dest="as_json", help="Emit machine-readable JSON."
+    )
     mutations_parser = subparsers.add_parser("mutations", help="Show tracked repository mutations.")
     mutations_parser.add_argument("--last", action="store_true", help="Show only the latest transaction.")
     edit_parser = subparsers.add_parser("edit", help="Propose a file replacement and request approval.")
@@ -183,7 +197,16 @@ def main() -> None:
         elif args.command == "status":
             print_status_cards(config, runtime.provider, runtime=runtime)
         elif args.command == "doctor":
-            print_doctor(config, runtime.provider, workspace)
+            passed = print_doctor(
+                config,
+                runtime.provider,
+                workspace,
+                production=args.production,
+                target=args.target,
+                as_json=args.as_json,
+            )
+            if not passed:
+                raise SystemExit(2)
 
         elif args.command == "register":
             if runtime.auth.register(args.username, args.password):
@@ -513,17 +536,46 @@ def approve_in_cli(proposal: EditProposal) -> bool:
     return answer in {"y", "yes"}
 
 
-def print_doctor(config, provider, workspace: Path) -> None:
+def print_doctor(
+    config,
+    provider,
+    workspace: Path,
+    *,
+    production: bool = False,
+    target: str = "local",
+    as_json: bool = False,
+) -> bool:
+    if production:
+        from pulse.production import run_production_checks
+
+        report = run_production_checks(
+            workspace,
+            config,
+            provider_configured=provider.is_configured,
+            target=target,
+        )
+        if as_json:
+            print(json.dumps(report.to_dict(), separators=(",", ":")))
+            return report.passed
+
+        table = Table(title=f"Pulse production doctor ({target})")
+        table.add_column("Check", style="cyan")
+        table.add_column("State")
+        table.add_column("Detail")
+        table.add_column("Remediation")
+        for check in report.checks:
+            state = "OK" if check.ok else "Warning" if not check.blocking else "BLOCKED"
+            table.add_row(check.name, state, check.detail, "" if check.ok else check.remediation)
+        print_cli_output(table, title="Production doctor")
+        return report.passed
+
     api_key_env_var = getattr(provider, "api_key_env_var", "Provider API key")
-    local_pulse = workspace / ".venv" / "Scripts" / "pulse.exe"
     checks = [
         ("Workspace", str(workspace), workspace.exists()),
         ("agent.config.json", str(workspace / "agent.config.json"), (workspace / "agent.config.json").exists()),
-        (".env", str(workspace / ".env"), (workspace / ".env").exists()),
         ("Provider key", api_key_env_var, provider.is_configured),
         ("uv command", shutil.which("uv") or "not on PATH", shutil.which("uv") is not None),
         ("pulse command", shutil.which("pulse") or "not on PATH", shutil.which("pulse") is not None),
-        ("Local venv pulse", str(local_pulse), local_pulse.exists()),
         ("Single model mode", config.mode, config.mode == "single-model"),
         ("Configured provider", config.model.provider, bool(config.model.provider)),
         ("Configured model", config.model.name, bool(config.model.name)),
@@ -538,7 +590,24 @@ def print_doctor(config, provider, workspace: Path) -> None:
     for name, value, ok in checks:
         table.add_row(name, value, "OK" if ok else "Needs attention")
 
-    print_cli_output(table, title="Doctor")
+    passed = all(ok for _, _, ok in checks)
+    if as_json:
+        print(
+            json.dumps(
+                {
+                    "target": "development",
+                    "passed": passed,
+                    "checks": [
+                        {"name": name, "value": value, "ok": ok}
+                        for name, value, ok in checks
+                    ],
+                },
+                separators=(",", ":"),
+            )
+        )
+    else:
+        print_cli_output(table, title="Doctor")
+    return passed
 
 
 def print_mutations(events: list[dict[str, object]]) -> None:
