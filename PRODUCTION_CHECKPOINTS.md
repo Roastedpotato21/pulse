@@ -160,8 +160,8 @@ artifact, or operational-document link in the implementing commit.
 ## Release Candidate Evidence — 2026-08-28
 
 - Ruff passes for `src`, `tests`, and `scripts`.
-- Full local suite: 366 passed, 16 environment-dependent tests skipped.
-- CI-equivalent non-sandbox suite: 255 passed with 55.19% coverage against a
+- Full local suite: 369 passed, 16 environment-dependent tests skipped.
+- CI-equivalent non-sandbox suite: 257 passed with 55.20% coverage against a
   54% ratcheting floor.
 - Actionlint accepts both GitHub workflows; the VS Code TypeScript source
   compiles after `npm ci`.
