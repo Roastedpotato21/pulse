@@ -10,6 +10,7 @@ from pathlib import Path
 
 from rich.table import Table
 
+from pulse import __version__
 from pulse.auth import (
     AuthError,
     AuthTimeoutError,
@@ -61,6 +62,7 @@ from .cli_ui import (
 def main() -> None:
     set_correlation_id()
     parser = argparse.ArgumentParser(prog="pulse", description="Permissioned single-model project agent.")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     subparsers = parser.add_subparsers(dest="command")
 
     ask_parser = subparsers.add_parser("ask", help="Ask about the current project.")

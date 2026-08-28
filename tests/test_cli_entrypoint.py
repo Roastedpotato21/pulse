@@ -3,6 +3,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 
 def test_cli_module_entrypoint_shows_help() -> None:
     env = os.environ.copy()
@@ -41,3 +43,22 @@ def test_remote_module_entrypoint_shows_help() -> None:
     )
 
     assert "authenticated remote sandbox worker" in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("module", "program"),
+    [
+        ("pulse.cli", "pulse"),
+        ("pulse.rpc", "pulse-rpc"),
+        ("pulse.sandbox.remote.server", "pulse-remote"),
+    ],
+)
+def test_entrypoint_reports_package_version(module: str, program: str) -> None:
+    result = subprocess.run(
+        [sys.executable, "-m", module, "--version"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.stdout.strip() == f"{program} 0.1.0"

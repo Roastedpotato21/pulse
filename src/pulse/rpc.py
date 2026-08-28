@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 from typing import Any, Protocol
 
+from pulse import __version__
 from pulse.config import load_agent_config
 from pulse.runtime import build_runtime
 from pulse.telemetry import get_correlation_id, set_correlation_id
@@ -116,6 +117,7 @@ async def serve(workspace: str, host: str = "127.0.0.1", port: int = 8765) -> No
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="pulse-rpc", description="Run Pulse's local JSON-RPC WebSocket server.")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("--workspace", default=".")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)

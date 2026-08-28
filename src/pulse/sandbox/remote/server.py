@@ -20,6 +20,7 @@ from typing import Any
 
 import websockets
 
+from pulse import __version__
 from pulse.production import is_secure_remote_token
 from pulse.sandbox.remote.models import (
     SubmitExecutionRequest,
@@ -830,6 +831,7 @@ def main() -> None:
         prog="pulse-remote",
         description="Run Pulse's authenticated remote sandbox worker.",
     )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument(
         "--host",
         default=os.environ.get("PULSE_REMOTE_HOST", "127.0.0.1"),
