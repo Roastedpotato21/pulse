@@ -39,3 +39,15 @@ def test_styled_help_matches_public_command_surface(monkeypatch) -> None:
     assert "pulse login" in output and "pulse logout" in output
     assert "pulse register" not in output
     assert "pulse login USER PASS" not in output
+
+
+def test_interactive_help_uses_slash_command_syntax(monkeypatch) -> None:
+    stream = _capture_console(monkeypatch)
+
+    cli_ui.print_help_screen(interactive=True)
+
+    output = stream.getvalue()
+    assert "/keys set PROVIDER" in output
+    assert "/chat switch ID" in output
+    assert "/status" in output
+    assert "pulse keys set PROVIDER" not in output

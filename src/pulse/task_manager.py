@@ -1127,6 +1127,55 @@ class TaskManager:
 
     @staticmethod
     def _process_alive(pid: int) -> bool:
+        if pid <= 0:
+            return False
+
+        if os.name == "nt":
+            import ctypes
+            from ctypes import wintypes
+
+            synchronize = 0x00100000
+            wait_object_0 = 0x00000000
+            wait_timeout = 0x00000102
+            error_access_denied = 5
+
+            win_dll = ctypes.WinDLL
+            get_last_error = ctypes.get_last_error
+            kernel32 = win_dll("kernel32", use_last_error=True)
+
+            open_process = kernel32.OpenProcess
+            open_process.argtypes = [
+                wintypes.DWORD,
+                wintypes.BOOL,
+                wintypes.DWORD,
+            ]
+            open_process.restype = wintypes.HANDLE
+
+            wait_for_process = kernel32.WaitForSingleObject
+            wait_for_process.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+            wait_for_process.restype = wintypes.DWORD
+
+            close_handle = kernel32.CloseHandle
+            close_handle.argtypes = [wintypes.HANDLE]
+            close_handle.restype = wintypes.BOOL
+
+            handle = open_process(synchronize, False, pid)
+            if not handle:
+                # Access denied normally means the process exists but is protected.
+                return get_last_error() == error_access_denied
+
+            try:
+                status = wait_for_process(handle, 0)
+                if status == wait_object_0:
+                    return False
+                if status == wait_timeout:
+                    return True
+
+                # Conservatively treat an unknown state as alive.
+                return True
+            finally:
+                close_handle(handle)
+
         try:
             os.kill(pid, 0)
         except ProcessLookupError:

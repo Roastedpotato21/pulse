@@ -84,6 +84,21 @@ pulse-remote   Evaluation-only remote sandbox worker
 
 Use `pulse --help` for the current command surface and command-specific help.
 
+### Interactive shell
+
+Run `pulse` without arguments for the responsive project shell. Natural-language
+input goes to the agent; prefix any regular CLI command with `/` to run it in the
+same session, such as `/status`, `/keys list`, or `/chat switch ID`. Completions
+appear as you type and are always generated from the public CLI parser.
+
+- `Tab` or `Ctrl-Space`: open/accept command completion
+- `Up`/`Down`: navigate history; `Ctrl-R`: search history
+- `Alt-Enter`: insert a newline; `Enter`: submit
+- `Ctrl-C`: clear the current input; on an empty prompt, exit
+- `/help`, `/clear`, and `/exit`: shell controls
+
+History is stored locally in the Git-ignored `.pulse/history` file.
+
 ### Account and provider keys
 
 ```bash

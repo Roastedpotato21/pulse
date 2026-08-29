@@ -724,6 +724,12 @@ def print_chat_search_results(results: list, query: str, active_id: str = "") ->
 # ── Help screen ───────────────────────────────────────────────────────────────
 
 _HELP_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
+    ("Interactive shell", [
+        ("/COMMAND [ARGS]",      "Run any Pulse command without leaving chat"),
+        ("/help",                "Show this command reference"),
+        ("/clear",               "Clear the terminal"),
+        ("/exit",                "End the interactive session"),
+    ]),
     ("Chat", [
         ("pulse",                "Start interactive chat (restores last conversation)"),
         ('pulse ask "..."',      "Single-shot question"),
@@ -747,6 +753,7 @@ _HELP_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
         ("pulse mutations [--last]",   "Show tracked file mutations"),
         ("pulse rollback",             "Restore latest approved edit"),
         ("pulse edit FILE CONTENT",    "Propose and approve a file change"),
+        ("pulse patch FILE TARGET OP", "Patch a function or class"),
     ]),
     ("Memory", [
         ("pulse memory [--query Q]",   "Inspect or set long-term memory"),
@@ -760,6 +767,7 @@ _HELP_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
     ("Verification", [
         ("pulse verify",  "Run the project test suite"),
         ("pulse doctor",  "Check env, config, and provider readiness"),
+        ("pulse ci --pr NUMBER", "Run CI for a pull request"),
     ]),
     ("Configuration", [
         ("pulse version",                  "Show the installed Pulse version"),
@@ -773,13 +781,18 @@ _HELP_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
         ("pulse status",                   "Show agent configuration"),
         ("pulse serve",                    "Start JSON-RPC WebSocket server"),
         ("pulse tasks [--status S]",       "List workspace tasks"),
+        ("pulse task ID",                   "Show task details"),
+        ("pulse resume ID",                 "Resume a paused or failed task"),
+        ("pulse cancel ID",                 "Cancel a task"),
         ("pulse sessions",                 "List all sessions"),
+        ("pulse session ID",                "Show session details"),
+        ("pulse resume-session ID",         "Resume an inactive session"),
     ]),
 ]
 
 
-def print_help_screen() -> None:
-    """Render the full, grouped, styled help table."""
+def print_help_screen(*, interactive: bool = False) -> None:
+    """Render the full help table for terminal or interactive-shell syntax."""
     outer = Table.grid(padding=(0, 0))
     outer.add_column()
 
@@ -795,7 +808,13 @@ def print_help_screen() -> None:
         t.add_column("Command", style="bold white", no_wrap=True)
         t.add_column("Description", style="dim")
         for cmd, desc in commands:
-            t.add_row(cmd, desc)
+            display_command = cmd
+            if interactive:
+                if cmd == "pulse":
+                    display_command = "<message>"
+                elif cmd.startswith("pulse "):
+                    display_command = f"/{cmd.removeprefix('pulse ')}"
+            t.add_row(display_command, desc)
         outer.add_row(t)
         outer.add_row("")
 

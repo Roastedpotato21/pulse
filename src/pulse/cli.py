@@ -27,6 +27,7 @@ from pulse.ci.runner import CIRunner
 from pulse.config import load_agent_config
 from pulse.conversations import ConversationManager
 from pulse.edits import EditProposal
+from pulse.interactive import InteractivePrompt, parse_slash_command
 from pulse.provider_keys import ProviderKeyError, ProviderKeyStore
 from pulse.providers.manager import ProviderManager
 from pulse.runtime import build_runtime
@@ -62,8 +63,8 @@ from .cli_ui import (
 )
 
 
-def main() -> None:
-    set_correlation_id()
+def _build_parser() -> argparse.ArgumentParser:
+    """Build the public parser shared by batch and interactive modes."""
     parser = argparse.ArgumentParser(prog="pulse", description="Permissioned single-model project agent.")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     subparsers = parser.add_subparsers(dest="command")
@@ -182,7 +183,13 @@ def main() -> None:
     serve_parser.add_argument("--host", default="127.0.0.1")
     serve_parser.add_argument("--port", type=int, default=8765)
 
-    args = parser.parse_args()
+    return parser
+
+
+def main(argv: list[str] | None = None) -> None:
+    set_correlation_id()
+    parser = _build_parser()
+    args = parser.parse_args(argv)
     workspace = Path.cwd()
 
     if args.command == "version":
@@ -777,9 +784,11 @@ def _resolve_conversation(cm: ConversationManager, id_prefix: str):
 
 
 def _handle_interactive_mode(auth, agent, runtime=None) -> None:
-    """Handle default interactive launch with conversation tracking."""
+    """Handle the responsive interactive shell with conversation tracking."""
+    del auth  # Authentication state is read from the shared workspace store.
     workspace = Path.cwd()
     cm = ConversationManager(workspace)
+    prompt = InteractivePrompt(workspace, _build_parser())
 
     # Restore last active conversation or create a fresh one
     active_conv = cm.get_active()
@@ -802,31 +811,70 @@ def _handle_interactive_mode(auth, agent, runtime=None) -> None:
 
     # Show active conversation info
     print_chat_card(active_conv)
+    print_info("Type / to open the command menu, or /help to see every command.")
 
     while True:
         try:
-            prompt_label = active_conv.title[:28] if len(active_conv.title) > 28 else active_conv.title
-            user_input = input(f"pulse [{prompt_label}]> ").strip()
+            user_input = prompt.read(active_conv.title)
             if not user_input:
                 continue
-            if user_input.lower() in {"exit", "quit"}:
+            normalized = user_input.lower()
+            if normalized in {"exit", "quit", "/exit", "/quit"}:
                 break
-            if user_input.lower() in {"help", "?"}:
-                print_help_screen()
+            if normalized in {"help", "?", "/help", "/?"}:
+                print_help_screen(interactive=True)
+                continue
+            if normalized == "/clear":
+                print("\033[2J\033[H", end="")
+                continue
+            if user_input.startswith("/"):
+                try:
+                    command_args = parse_slash_command(user_input)
+                except ValueError as error:
+                    print_error(str(error))
+                    continue
+                if not command_args:
+                    continue
+                try:
+                    main(command_args)
+                except KeyboardInterrupt:
+                    print_warning("Command cancelled.")
+                except SystemExit as error:
+                    # argparse and command handlers use SystemExit for ordinary
+                    # user errors; a REPL command must never terminate the shell.
+                    if error.code not in {None, 0}:
+                        print_warning(f"Command finished with exit code {error.code}.")
+
+                refreshed = cm.get_active()
+                if refreshed is not None:
+                    active_conv = refreshed
+                    is_first_message = active_conv.turn_count == 0
+
+                # Model and key changes must take effect on the very next prompt.
+                if command_args[0] in {"model", "keys"}:
+                    runtime = build_runtime(workspace, load_agent_config(workspace))
+                    agent = runtime.agent
                 continue
 
             # Capture stdout to record the assistant response
             captured = io.StringIO()
             real_stdout = sys.stdout
             sys.stdout = captured
+            interrupted = False
             try:
                 with thinking_spinner():
                     agent.ask(user_input, auto_approve_reads=True)
+            except KeyboardInterrupt:
+                interrupted = True
             finally:
                 sys.stdout = real_stdout
                 output = captured.getvalue()
                 # Print to real stdout so user sees the answer
                 print(output, end="")
+
+            if interrupted:
+                print_warning("Request cancelled. Your session is still active.")
+                continue
 
             # Auto-title on first message in a fresh conversation
             if is_first_message:
