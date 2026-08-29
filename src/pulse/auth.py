@@ -1,8 +1,8 @@
 """Production-Grade Authentication Management for Pulse CLI.
 
 Implements OAuth 2.0 Authorization Code Flow with PKCE (Proof Key for Code Exchange),
-secure OS credential storage via keyring, automatic silent token refresh, ID token validation,
-and clean session management APIs for the Pulse developer CLI.
+secure OS credential storage via keyring, automatic silent token refresh, authenticated
+Google userinfo lookup, and clean session management APIs for the Pulse developer CLI.
 """
 
 from __future__ import annotations
@@ -421,7 +421,7 @@ def exchange_code_for_tokens(code: str, code_verifier: str) -> tuple[TokenSet, U
     )
 
     try:
-        with urllib.request.urlopen(req) as resp:
+        with urllib.request.urlopen(req, timeout=15) as resp:
             token_res = json.loads(resp.read().decode("utf-8"))
     except urllib.error.URLError as e:
         raise AuthError(f"Failed to exchange authorization code: {e}") from e
@@ -447,39 +447,26 @@ def exchange_code_for_tokens(code: str, code_verifier: str) -> tuple[TokenSet, U
 
 
 def _extract_user_profile(id_token: str | None, access_token: str) -> UserProfile:
-    email: str | None = None
-    name: str | None = None
-    picture: str | None = None
-    sub: str | None = None
+    # The ID token payload can be decoded for diagnostics, but it must not be
+    # trusted without signature verification. The authenticated userinfo
+    # endpoint is authoritative for the public CLI login identity.
+    del id_token
+    try:
+        req = urllib.request.Request(
+            "https://www.googleapis.com/oauth2/v3/userinfo",
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            info = json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, json.JSONDecodeError, OSError, ValueError) as error:
+        raise AuthError(f"Could not verify the Google user profile: {error}") from error
 
-    if id_token:
-        try:
-            payload = decode_jwt_payload(id_token)
-            email = payload.get("email")
-            name = payload.get("name")
-            picture = payload.get("picture")
-            sub = payload.get("sub")
-        except (json.JSONDecodeError, TypeError, KeyError, ValueError):
-            pass
-
+    email = info.get("email")
+    name = info.get("name")
+    picture = info.get("picture")
+    sub = info.get("sub")
     if not email or not sub:
-        try:
-            req = urllib.request.Request(
-                "https://www.googleapis.com/oauth2/v3/userinfo",
-                headers={"Authorization": f"Bearer {access_token}"},
-            )
-            with urllib.request.urlopen(req) as resp:
-                info = json.loads(resp.read().decode("utf-8"))
-                email = email or info.get("email")
-                name = name or info.get("name")
-                picture = picture or info.get("picture")
-                sub = sub or info.get("sub")
-        except Exception as e:
-            if not email:
-                raise AuthError(f"Could not extract user details from ID token or userinfo: {e}") from e
-
-    if not email:
-        raise AuthError("Failed to obtain email from Google authentication.")
+        raise AuthError("Google userinfo response did not include email and subject identifiers.")
 
     return UserProfile(
         email=email,
@@ -499,7 +486,7 @@ def revoke_token(token: str) -> bool:
             data=data,
             headers={"Content-Type": "application/x-www-form-urlencoded"},
         )
-        with urllib.request.urlopen(req) as resp:
+        with urllib.request.urlopen(req, timeout=10) as resp:
             return resp.status == 200
     except (urllib.error.URLError, OSError, ValueError):
         return False
@@ -580,7 +567,7 @@ class AuthenticationManager:
         )
 
         try:
-            with urllib.request.urlopen(req) as resp:
+            with urllib.request.urlopen(req, timeout=15) as resp:
                 token_res = json.loads(resp.read().decode("utf-8"))
         except (urllib.error.URLError, json.JSONDecodeError, OSError):
             return False
@@ -604,29 +591,8 @@ class AuthenticationManager:
         _token_store.store_session(user, updated_tokens)
         return True
 
-    def register(self, username: str, password: str) -> bool:
-        if not username or not password:
-            raise ValueError("Username and password are required")
-        return True
-
-    def login(self, username: str, password: str) -> bool:
-        return False
-
     def get_google_config(self) -> dict:
         return get_google_config()
-
-    def google_login_url(self) -> str:
-        state = generate_state()
-        _, challenge = generate_pkce_pair()
-        return build_authorization_url(state, challenge)
-
-    def exchange_google_code(self, code: str) -> bool:
-        try:
-            tokens, user = exchange_code_for_tokens(code, "dummy_verifier")
-            _token_store.store_session(user, tokens)
-            return True
-        except (AuthError, OSError, ValueError):
-            return False
 
     def get_access_token(self, auto_refresh: bool = True) -> str | None:
         session = _token_store.load_session()

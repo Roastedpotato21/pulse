@@ -25,6 +25,11 @@ pre-1.0 APIs may change with release notes and migration guidance.
   release suite, preventing unreviewed major-version drift at installation.
 - Explicit live-Docker test markers, a single no-skip Docker security gate, and
   stable Windows pytest teardown behavior in hosted CI.
+- Public `version` and secure provider-key rotation commands, simplified OAuth
+  login/logout UX, authenticated Google userinfo verification, and literal-safe
+  terminal rendering for untrusted text.
+- Non-root Docker overlay export that avoids archive metadata preservation on
+  bind mounts, preventing successful sandbox commands from exiting with 125.
 
 ### Known limitations
 

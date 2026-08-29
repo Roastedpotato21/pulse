@@ -84,6 +84,25 @@ pulse-remote   Evaluation-only remote sandbox worker
 
 Use `pulse --help` for the current command surface and command-specific help.
 
+### Account and provider keys
+
+```bash
+pulse version
+pulse login
+pulse auth-status
+pulse whoami
+pulse logout
+pulse keys list
+pulse keys set openai
+pulse keys remove openai
+```
+
+`pulse keys set` prompts with hidden input; provider keys are never accepted as
+command-line arguments or printed back to the terminal. Keys managed by the CLI
+are stored in the Git-ignored workspace `.env` file with restrictive file
+permissions. Environment variables and external secret managers remain
+supported and take precedence for the current process.
+
 ## Supported boundary
 
 The 0.1.0 beta supports the local CLI and loopback RPC server for one trusted

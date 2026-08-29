@@ -5,6 +5,7 @@ import pytest
 
 from pulse.auth import (
     AuthenticationManager,
+    AuthError,
     SecureTokenStore,
     TokenSet,
     UserProfile,
@@ -22,10 +23,11 @@ from pulse.auth import (
 
 
 @pytest.fixture
-def auth_workspace(tmp_path):
+def auth_workspace(tmp_path, monkeypatch):
     """Fixture initializing temporary workspace for auth token store."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
+    monkeypatch.setattr("pulse.auth.revoke_token", lambda _token: True)
     set_token_store_workspace(workspace)
     yield workspace
     logout()
@@ -124,6 +126,12 @@ def test_exchange_code_for_tokens(auth_workspace, monkeypatch):
     id_token = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiI5ODciLCJlbWFpbCI6ImFsaWNlQGV4YW1wbGUuY29tIiwibmFtZSI6IkFsaWNlIn0.sig"
 
     def mock_urlopen(req, *args, **kwargs):
+        if "userinfo" in req.full_url:
+            return MockHTTPResponse(json.dumps({
+                "email": "alice@example.com",
+                "name": "Alice",
+                "sub": "987",
+            }).encode("utf-8"))
         return MockHTTPResponse(json.dumps({
             "access_token": "acc_token_abc",
             "refresh_token": "ref_token_xyz",
@@ -140,6 +148,26 @@ def test_exchange_code_for_tokens(auth_workspace, monkeypatch):
     assert user.sub == "987"
     assert tokens.access_token == "acc_token_abc"
     assert tokens.refresh_token == "ref_token_xyz"
+
+
+def test_exchange_rejects_unverified_id_token_identity(auth_workspace, monkeypatch):
+    monkeypatch.setenv("GOOGLE_CLIENT_ID", "client123")
+    monkeypatch.setenv("GOOGLE_CLIENT_SECRET", "secret456")
+    forged = "e30.eyJzdWIiOiJhdHRhY2tlciIsImVtYWlsIjoiYXR0YWNrZXJAZXhhbXBsZS5jb20ifQ.invalid"
+
+    def mock_urlopen(req, *args, **kwargs):
+        if "userinfo" in req.full_url:
+            raise OSError("userinfo unavailable")
+        return MockHTTPResponse(json.dumps({
+            "access_token": "access-token",
+            "id_token": forged,
+            "expires_in": 3600,
+        }).encode("utf-8"))
+
+    monkeypatch.setattr("urllib.request.urlopen", mock_urlopen)
+
+    with pytest.raises(AuthError, match="Could not verify the Google user profile"):
+        exchange_code_for_tokens("auth-code", "verifier")
 
 
 def test_refresh_session_success(auth_workspace, monkeypatch):

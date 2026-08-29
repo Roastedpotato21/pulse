@@ -57,6 +57,7 @@ node_modules/
 
 # Auth session and token files — never commit these
 .agent/.pulse-session.json
+.agent/.pulse-auth-session.json
 .agent/pulse-auth.sqlite3
 
 # Pulse agent workspace default

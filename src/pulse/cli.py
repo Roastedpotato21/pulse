@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import getpass
 import io
 import json
 import shutil
@@ -12,6 +13,7 @@ from rich.table import Table
 
 from pulse import __version__
 from pulse.auth import (
+    AuthenticationManager,
     AuthError,
     AuthTimeoutError,
     StateMismatchError,
@@ -19,13 +21,13 @@ from pulse.auth import (
     get_current_user,
     is_authenticated,
     login,
-    logout,
 )
 from pulse.ci import github_client
 from pulse.ci.runner import CIRunner
 from pulse.config import load_agent_config
 from pulse.conversations import ConversationManager
 from pulse.edits import EditProposal
+from pulse.provider_keys import ProviderKeyError, ProviderKeyStore
 from pulse.providers.manager import ProviderManager
 from pulse.runtime import build_runtime
 from pulse.telemetry import set_correlation_id
@@ -52,6 +54,7 @@ from .cli_ui import (
     print_session_footer,
     print_signed_in,
     print_status_cards,
+    print_success,
     print_verification,
     print_warning,
     task_spinner,
@@ -65,12 +68,26 @@ def main() -> None:
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     subparsers = parser.add_subparsers(dest="command")
 
+    subparsers.add_parser("version", help="Show the installed Pulse version.")
+
     ask_parser = subparsers.add_parser("ask", help="Ask about the current project.")
     ask_parser.add_argument("question", nargs="+")
 
     model_parser = subparsers.add_parser("model", help="Interactive AI provider & model manager.")
     model_parser.add_argument("provider", nargs="?", default=None, help="Provider name or subcommand ('list', 'current', gemini, openrouter, openai, anthropic, groq, deepseek)")
     model_parser.add_argument("model", nargs="?", default=None, help="Model identifier")
+
+    keys_parser = subparsers.add_parser(
+        "keys", help="Safely list, set, or remove provider API keys."
+    )
+    keys_subparsers = keys_parser.add_subparsers(dest="keys_command", required=True)
+    keys_subparsers.add_parser("list", help="Show provider key configuration without values.")
+    keys_set = keys_subparsers.add_parser("set", help="Securely prompt for a provider API key.")
+    keys_set.add_argument("provider", help="Provider name")
+    keys_remove = keys_subparsers.add_parser(
+        "remove", help="Remove a provider key from the workspace .env."
+    )
+    keys_remove.add_argument("provider", help="Provider name")
 
     # ── Conversation management ──────────────────────────────────────────────
     chat_parser = subparsers.add_parser("chat", help="Manage conversations.")
@@ -151,22 +168,15 @@ def main() -> None:
     resume_session_parser = subparsers.add_parser("resume-session", help="Resume an archived or inactive session.")
     resume_session_parser.add_argument("id", help="Session ID to resume")
 
-    # Auth commands
-    register_parser = subparsers.add_parser("register", help="Register a new user (local account).")
-    register_parser.add_argument("username")
-    register_parser.add_argument("password")
-
-    login_parser = subparsers.add_parser(
+    # Authentication commands
+    subparsers.add_parser(
         "login",
         help="Sign in with Google OAuth 2.0 PKCE flow.",
     )
-    login_parser.add_argument("username", nargs="?", default=None, help=argparse.SUPPRESS)
-    login_parser.add_argument("password", nargs="?", default=None, help=argparse.SUPPRESS)
 
     subparsers.add_parser("logout", help="Sign out and clear stored tokens.")
     subparsers.add_parser("whoami", help="Show the currently signed-in user.")
     subparsers.add_parser("auth-status", help="Show current authentication status.")
-    subparsers.add_parser("google-login", help="Sign in with Google OAuth.")
 
     serve_parser = subparsers.add_parser("serve", help="Start the local JSON-RPC WebSocket server for IDE clients.")
     serve_parser.add_argument("--host", default="127.0.0.1")
@@ -174,6 +184,32 @@ def main() -> None:
 
     args = parser.parse_args()
     workspace = Path.cwd()
+
+    if args.command == "version":
+        print(f"pulse {__version__}")
+        return
+
+    if args.command == "keys":
+        _handle_keys_command(workspace, args)
+        return
+
+    if args.command in {"login", "logout", "whoami", "auth-status"}:
+        auth = AuthenticationManager(workspace)
+        if args.command == "login":
+            _handle_login_command()
+        elif args.command == "logout":
+            auth.logout()
+            print_success("Signed out and cleared the stored session.")
+        elif args.command == "whoami":
+            _show_whoami()
+        elif auth.is_authenticated():
+            user = auth.get_current_user()
+            identity = (user.name or user.email) if user else "Authenticated user"
+            print_success(f"Signed in as {identity}.")
+        else:
+            print_warning("Not signed in. Run `pulse login` to authenticate.")
+            raise SystemExit(1)
+        return
 
     if args.command == "model":
         _handle_model_command(workspace, args.provider, args.model)
@@ -209,32 +245,6 @@ def main() -> None:
             )
             if not passed:
                 raise SystemExit(2)
-
-        elif args.command == "register":
-            if runtime.auth.register(args.username, args.password):
-                print_info(f"Successfully registered user: {args.username}")
-            else:
-                print_info(f"Failed to register. User {args.username} may already exist.")
-
-        elif args.command in ("login", "google-login"):
-            _handle_login_command()
-
-        elif args.command == "logout":
-            logout()
-            print("✓ Successfully signed out")
-
-        elif args.command == "whoami":
-            _show_whoami()
-
-        elif args.command == "auth-status":
-            if is_authenticated():
-                user = get_current_user()
-                if user:
-                    print_info(f"Signed in as: {user.name or user.email} ({user.email})")
-                else:
-                    print_info("Signed in.")
-            else:
-                print_info("Not logged in.")
 
         elif args.command == "mutations":
             if not is_authenticated():
@@ -487,17 +497,13 @@ def _handle_login_command() -> None:
     if is_authenticated():
         user = get_current_user()
         email = user.email if user else "user"
-        print(f"✓ Already signed in as {email}")
+        print_success(f"Already signed in as {email}.")
         return
 
     try:
         user = login()
         if user:
-            print("✓ Successfully authenticated.\n")
-            print("Welcome back,")
-            if user.name and user.name != user.email:
-                print(user.name)
-            print(user.email)
+            print_signed_in(user.name, user.email)
     except UserCancelledError:
         print_error("Authentication was cancelled in the browser.")
         sys.exit(1)
@@ -517,6 +523,51 @@ def _handle_login_command() -> None:
             "See .env.example and the README for setup instructions."
         )
         sys.exit(1)
+
+
+def _handle_keys_command(workspace: Path, args: object) -> None:
+    """Handle provider keys without ever echoing secret values."""
+    store = ProviderKeyStore(workspace)
+    command = getattr(args, "keys_command", None)
+    try:
+        if command == "list":
+            table = Table(title="Provider API keys")
+            table.add_column("Provider", style="cyan")
+            table.add_column("Environment variable")
+            table.add_column("State")
+            table.add_column("Source")
+            for status in store.statuses():
+                table.add_row(
+                    status.provider,
+                    status.environment_variable,
+                    "Configured" if status.configured else "Missing",
+                    status.source,
+                )
+            print_cli_output(table, title="Provider keys")
+            return
+
+        provider = str(getattr(args, "provider", ""))
+        if command == "set":
+            value = getpass.getpass(f"Enter the {provider} API key (input hidden): ")
+            variable = store.set(provider, value)
+            print_success(f"Updated {variable} in the ignored workspace .env file.")
+            return
+
+        if command == "remove":
+            variable, removed, environment_still_set = store.remove(provider)
+            if removed:
+                print_success(f"Removed {variable} from the workspace .env file.")
+            else:
+                print_warning(f"{variable} was not present in the workspace .env file.")
+            if environment_still_set:
+                print_warning(
+                    f"{variable} is still configured in the process environment; "
+                    "remove it from your shell or secret manager separately."
+                )
+            return
+    except ProviderKeyError as error:
+        print_error(str(error))
+        raise SystemExit(2) from error
 
 
 def _show_whoami() -> None:

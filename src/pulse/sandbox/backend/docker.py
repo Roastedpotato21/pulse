@@ -453,7 +453,10 @@ class DockerBackend:
             b'#!/bin/sh\n'
             b'"$@"\n'
             b'status=$?\n'
-            b'cp -a /workspace-overlay/. /workspace-export/ || exit 125\n'
+            # Do not use ``cp -a`` here. GNU cp tries to preserve metadata on
+            # the bind-mount root itself, which a non-root container user
+            # cannot chmod/chown, and turns every successful command into 125.
+            b'cp -R /workspace-overlay/. /workspace-export/ || exit 125\n'
             b"find /workspace-export -mindepth 1 -exec chmod a+rwX {} \\; || exit 125\n"
             b': > /workspace-export/.pulse-export-complete || exit 125\n'
             b'exit "$status"\n'

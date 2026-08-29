@@ -32,8 +32,11 @@ def test_release_actions_are_immutable_and_attestations_are_authorized() -> None
     assert "if-no-files-found: warn" in ci_workflow
     assert "needs: [test, dependency-audit, secret-scan, vscode-extension, docker-security]" in ci_workflow
     assert "cancel-in-progress: false" in ci_workflow
+    assert "UV_PYTHON: ${{ matrix.python }}" in ci_workflow
     assert 'uv sync --locked --python "${{ matrix.python }}"' in ci_workflow
     assert "uv run python --version" in ci_workflow
+    assert "--junitxml=release-metadata/windows-tests.xml" in ci_workflow
+    assert "windows-test-report-${{ matrix.python }}" in ci_workflow
     assert "runs-on: ubuntu-24.04" in ci_workflow
     assert "docker run --rm python:3.11-slim python --version" in ci_workflow
     assert "sudo journalctl -u docker --no-pager -n 100" in ci_workflow

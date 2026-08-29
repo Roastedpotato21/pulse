@@ -19,6 +19,12 @@ metadata, correlation identifiers, cost/token measurements, and credentials.
 Credentials are read for authentication but must not be written to prompts,
 logs, databases, or source control.
 
+OAuth sessions use the operating-system keyring when available. The local
+recovery file and workspace `.env` are excluded from Git and release artifacts;
+they still contain sensitive credentials and must not be shared or backed up to
+an untrusted location. `pulse keys list` reports configuration state and source
+without displaying secret values.
+
 ## Where data goes
 
 Pulse stores operational data locally in the configured workspace by default,

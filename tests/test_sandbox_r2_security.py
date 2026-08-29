@@ -340,7 +340,8 @@ def test_docker_overlay_is_exported_before_container_exit(tmp_path: Path):
 
     backend._write_export_wrapper(wrapper)
     wrapper_text = wrapper.read_text(encoding="utf-8")
-    assert "cp -a /workspace-overlay/. /workspace-export/" in wrapper_text
+    assert "cp -R /workspace-overlay/. /workspace-export/" in wrapper_text
+    assert "cp -a" not in wrapper_text
     assert ".pulse-export-complete" in wrapper_text
 
 

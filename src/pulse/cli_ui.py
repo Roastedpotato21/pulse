@@ -20,14 +20,17 @@ from typing import Any
 from rich import box
 from rich.align import Align
 from rich.console import Console
+from rich.markup import escape
 from rich.panel import Panel
 from rich.rule import Rule
 from rich.table import Table
 
+from pulse import __version__
+
 # ── Global console ────────────────────────────────────────────────────────────
 console = Console()
 
-_VERSION = "0.1.0"
+_VERSION = __version__
 
 
 # ── Terminal capability helpers ───────────────────────────────────────────────
@@ -75,14 +78,14 @@ def _rule(title: str | None = None) -> Rule:
 
 def print_info(message: str) -> None:
     """Informational message — cyan bordered panel."""
-    console.print(_panel("Info", message, style="cyan"))
+    console.print(_panel("Info", escape(message), style="cyan"))
     console.print()
 
 
 def print_success(message: str) -> None:
     """Success message — green panel with check mark."""
     console.print(
-        _panel("Success", f"[bold green]{_ok()}[/bold green]  {message}", style="green")
+        _panel("Success", f"[bold green]{_ok()}[/bold green]  {escape(message)}", style="green")
     )
     console.print()
 
@@ -90,7 +93,7 @@ def print_success(message: str) -> None:
 def print_warning(message: str) -> None:
     """Warning message — yellow panel."""
     console.print(
-        _panel("Warning", f"[bold yellow]{_warn()}[/bold yellow]  {message}", style="yellow")
+        _panel("Warning", f"[bold yellow]{_warn()}[/bold yellow]  {escape(message)}", style="yellow")
     )
     console.print()
 
@@ -98,7 +101,7 @@ def print_warning(message: str) -> None:
 def print_error(message: str) -> None:
     """Error message — red panel."""
     console.print(
-        _panel("Error", f"[bold red]{_err()}[/bold red]  {message}", style="red")
+        _panel("Error", f"[bold red]{_err()}[/bold red]  {escape(message)}", style="red")
     )
     console.print()
 
@@ -106,37 +109,39 @@ def print_error(message: str) -> None:
 def print_question(message: str) -> None:
     """User question — magenta panel."""
     console.print(
-        _panel("Question", f"[bold magenta]?[/bold magenta]  {message}", style="magenta")
+        _panel("Question", f"[bold magenta]?[/bold magenta]  {escape(message)}", style="magenta")
     )
     console.print()
 
 
 def print_answer(message: str) -> None:
     """Agent answer — bright_cyan panel."""
-    console.print(_panel("Answer", message, style="bright_cyan"))
+    console.print(_panel("Answer", escape(message), style="bright_cyan"))
     console.print()
 
 
 def print_summary(message: str) -> None:
     """Summary panel — dim."""
-    console.print(_panel("Summary", message, style="dim"))
+    console.print(_panel("Summary", escape(message), style="dim"))
     console.print()
 
 
 def print_verification(message: str) -> None:
     """Proposed-edit verification — blue panel."""
-    console.print(_panel("Verification", message, style="blue"))
+    console.print(_panel("Verification", escape(message), style="blue"))
     console.print()
 
 
 def print_prompt(message: str) -> None:
     """Neutral prompt panel."""
-    console.print(_panel(None, message))
+    console.print(_panel(None, escape(message)))
     console.print()
 
 
 def print_cli_output(content: Any, title: str | None = None, style: str = "") -> None:
     """Generic CLI output. Accepts plain strings and Rich renderables (Tables, etc.)."""
+    if isinstance(content, str):
+        content = escape(content)
     console.print(_panel(title, content, style=style))
     console.print()
 
@@ -190,16 +195,16 @@ def _print_status_grid(config: Any, runtime: Any = None) -> None:
         if info:
             _uname, display_name, email = info
             if display_name and email:
-                auth_text = f"{display_name} ({email})"
+                auth_text = f"{escape(display_name)} ({escape(email)})"
             elif email:
-                auth_text = email
+                auth_text = escape(email)
             else:
-                auth_text = f"@{auth.current_user()}"
+                auth_text = f"@{escape(str(auth.current_user()))}"
         else:
-            auth_text = f"@{auth.current_user()}"
+            auth_text = f"@{escape(str(auth.current_user()))}"
         auth_style = "bold green"
 
-    project_path = str(getattr(getattr(config, "sandbox", None), "workspace_root", "."))
+    project_path = escape(str(getattr(getattr(config, "sandbox", None), "workspace_root", ".")))
     if len(project_path) > 40:
         project_path = "..." + project_path[-37:]
 
@@ -209,10 +214,10 @@ def _print_status_grid(config: Any, runtime: Any = None) -> None:
     grid.add_column(style="dim", no_wrap=True, min_width=4)
     grid.add_column(no_wrap=True)
 
-    grid.add_row("Provider", f"[cyan]{config.model.provider}[/cyan]",
+    grid.add_row("Provider", f"[cyan]{escape(str(config.model.provider))}[/cyan]",
                  "Auth", f"[{auth_style}]{auth_text}[/{auth_style}]")
-    grid.add_row("Model",    f"[cyan]{config.model.name}[/cyan]",
-                 "Mode", f"[cyan]{config.mode}[/cyan]")
+    grid.add_row("Model",    f"[cyan]{escape(str(config.model.name))}[/cyan]",
+                 "Mode", f"[cyan]{escape(str(config.mode))}[/cyan]")
     grid.add_row("Project",  f"[dim]{project_path}[/dim]",
                  "Version", f"[dim]v{_VERSION}[/dim]")
 
@@ -257,9 +262,9 @@ def print_signed_in(display_name: str | None, email: str | None) -> None:
     ok = _ok()
     rows: list[str] = []
     if display_name:
-        rows.append(f"[bold green]{ok}  {display_name}[/bold green]")
+        rows.append(f"[bold green]{ok}  {escape(display_name)}[/bold green]")
     if email:
-        rows.append(f"[dim]   {email}[/dim]")
+        rows.append(f"[dim]   {escape(email)}[/dim]")
     if not rows:
         rows.append(f"[bold green]{ok}  Signed in[/bold green]")
 
@@ -747,16 +752,19 @@ _HELP_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
     ]),
     ("Authentication", [
         ("pulse login",           "Sign in with Google OAuth"),
-        ("pulse login USER PASS", "Sign in with local account"),
         ("pulse logout",          "Sign out and clear tokens"),
         ("pulse whoami",          "Show signed-in user"),
-        ("pulse register U P",    "Register a local account"),
+        ("pulse auth-status",      "Check authentication state"),
     ]),
     ("Verification", [
         ("pulse verify",  "Run the project test suite"),
         ("pulse doctor",  "Check env, config, and provider readiness"),
     ]),
     ("Configuration", [
+        ("pulse version",                  "Show the installed Pulse version"),
+        ("pulse keys list",                "Show provider key status without values"),
+        ("pulse keys set PROVIDER",        "Securely set or rotate a provider key"),
+        ("pulse keys remove PROVIDER",     "Remove a workspace provider key"),
         ("pulse model",                    "Interactive AI provider & model manager"),
         ("pulse model current",            "Display active AI provider & model details"),
         ("pulse model list",               "List all supported providers & models"),
@@ -884,10 +892,10 @@ def print_status_cards(config: Any, provider: Any, runtime: Any = None) -> None:
 
     grid.add_row(
         "Active Provider",
-        config.model.provider,
+        escape(str(config.model.provider)),
         f"[green]{_ok()} Configured ({api_key_var})[/green]" if key_configured else f"[red]{_err()} Missing {api_key_var}[/red]",
     )
-    grid.add_row("Active Model", config.model.name, f"[dim]Max tokens: {config.model.max_tokens}[/dim]")
+    grid.add_row("Active Model", escape(str(config.model.name)), f"[dim]Max tokens: {config.model.max_tokens}[/dim]")
     grid.add_row("Authentication", auth_str, f"[{auth_style}]{auth_str}[/{auth_style}]")
     grid.add_row("Repository Indexed", "Code intelligence & semantic search", f"[green]{_ok()} {repo_str}[/green]")
     grid.add_row("Memory Status", "Episodic & preference storage", f"[green]{_ok()} {mem_str}[/green]")
