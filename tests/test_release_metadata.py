@@ -21,6 +21,7 @@ def _release_files(directory: Path) -> None:
             "Requires-Dist: httpx==0.28.1\n"
             "Requires-Dist: keyring==25.7.0\n"
             "Requires-Dist: openai==2.44.0\n"
+            "Requires-Dist: prompt-toolkit==3.0.52\n"
             "Requires-Dist: python-dotenv==1.2.2\n"
             "Requires-Dist: rich==15.0.0\n"
             "Requires-Dist: typer==0.26.8\n"
