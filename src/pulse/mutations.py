@@ -11,6 +11,7 @@ from difflib import unified_diff
 from pathlib import Path
 from typing import Self
 
+from pulse.subprocesses import isolated_process_kwargs
 from pulse.telemetry import get_correlation_id
 
 
@@ -108,6 +109,7 @@ class MutationTracker:
                 capture_output=True,
                 timeout=timeout,
                 check=False,
+                **isolated_process_kwargs(),
             )
 
     def git_state(self) -> dict[str, object]:
@@ -235,7 +237,14 @@ class MutationTracker:
                 handle.write(json.dumps(asdict(event), separators=(",", ":")) + "\n")
 
     def _git(self, *args: str) -> str | None:
-        result = subprocess.run(["git", *args], cwd=self.workspace, text=True, capture_output=True, check=False)
+        result = subprocess.run(
+            ["git", *args],
+            cwd=self.workspace,
+            text=True,
+            capture_output=True,
+            check=False,
+            **isolated_process_kwargs(),
+        )
         return result.stdout.strip() if result.returncode == 0 else None
 
     def _git_lines(self, *args: str) -> list[str]:

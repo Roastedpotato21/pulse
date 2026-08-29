@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from pulse.subprocesses import isolated_process_kwargs, terminate_process
 from pulse.tool_registry import ToolInvocation, ToolRegistry, ToolResult
 
 
@@ -39,12 +40,14 @@ class _MCPTool:
     async def _call_stdio(self, params: dict[str, Any]) -> ToolResult:
         cmd = self._endpoint.split()
         payload = json.dumps({"method": self.name, "params": params}) + "\n"
+        process: asyncio.subprocess.Process | None = None
         try:
             process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
+                **isolated_process_kwargs(),
             )
             stdout, _ = await asyncio.wait_for(
                 process.communicate(payload.encode()),
@@ -54,7 +57,11 @@ class _MCPTool:
             content = data.get("result") or data.get("content") or str(data)
             return ToolResult(str(content), metadata={"server": self._server_name, "transport": "stdio"})
         except TimeoutError:
+            await terminate_process(process)
             return ToolResult(f"MCP tool '{self.name}' timed out.", metadata={"error": "timeout"})
+        except asyncio.CancelledError:
+            await terminate_process(process)
+            raise
         # Intentionally broad to isolate execution boundaries and prevent crashes.
         except Exception as exc:  # noqa: BLE001
             return ToolResult(f"MCP tool '{self.name}' error: {exc}", metadata={"error": str(exc)})
@@ -145,17 +152,26 @@ class MCPClientManager:
     async def _probe_stdio_manifest(self, command: str) -> list[dict[str, Any]]:
         cmd = command.split()
         payload = json.dumps({"method": "tools/list", "params": {}}) + "\n"
+        process: asyncio.subprocess.Process | None = None
         try:
             process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
+                **isolated_process_kwargs(),
             )
             stdout, _ = await asyncio.wait_for(process.communicate(payload.encode()), timeout=10)
             data = json.loads(stdout.decode(errors="replace"))
             tools = data.get("result", data.get("tools", []))
             return tools if isinstance(tools, list) else []
+        except TimeoutError:
+            await terminate_process(process)
+            return []
+        except asyncio.CancelledError:
+            await terminate_process(process)
+            raise
         # Intentionally broad to isolate execution boundaries and prevent crashes.
         except Exception:  # noqa: BLE001
+            await terminate_process(process)
             return []

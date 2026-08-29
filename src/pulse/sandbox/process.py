@@ -27,6 +27,7 @@ from pulse.sandbox.resources import (
     ResourceLimits,
     ResourcePolicy,
 )
+from pulse.subprocesses import isolated_process_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -68,13 +69,14 @@ class ProcessManager:
         )
         policy = controller.policy
         cmd_str = command if isinstance(command, str) else " ".join(command)
-        extra_kwargs: dict[str, Any] = {"close_fds": True}
+        extra_kwargs: dict[str, Any] = {
+            "close_fds": True,
+            **isolated_process_kwargs(),
+        }
         if sys.platform != "win32":
             extra_kwargs["start_new_session"] = True
             if apply_native_limits:
                 extra_kwargs["preexec_fn"] = controller.make_preexec_fn()
-        else:
-            extra_kwargs["creationflags"] = getattr(__import__("subprocess"), "CREATE_NEW_PROCESS_GROUP", 0)
 
         proc: asyncio.subprocess.Process | None = None
         stdout = b""
@@ -227,6 +229,7 @@ class ProcessManager:
                         "/F",
                         stdout=asyncio.subprocess.DEVNULL,
                         stderr=asyncio.subprocess.DEVNULL,
+                        **isolated_process_kwargs(),
                     )
                     await asyncio.wait_for(
                         helper.wait(), timeout=max(1.0, min(5.0, grace_seconds + 1.0))

@@ -8,6 +8,8 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from pulse.subprocesses import isolated_process_kwargs, terminate_process
+
 
 @dataclass(frozen=True, slots=True)
 class VerificationTarget:
@@ -102,11 +104,17 @@ class VerificationEngine:
 
     @staticmethod
     async def _run_command(command: tuple[str, ...], workspace: Path) -> tuple[int, str, str]:
+        process: asyncio.subprocess.Process | None = None
         try:
             process = await asyncio.create_subprocess_exec(
                 *command, cwd=workspace, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                **isolated_process_kwargs(),
             )
         except OSError as error:
             return 127, "", str(error)
-        stdout, stderr = await process.communicate()
+        try:
+            stdout, stderr = await process.communicate()
+        except asyncio.CancelledError:
+            await terminate_process(process)
+            raise
         return process.returncode, stdout.decode(errors="replace"), stderr.decode(errors="replace")

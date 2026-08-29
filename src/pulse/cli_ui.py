@@ -26,6 +26,7 @@ from rich.rule import Rule
 from rich.table import Table
 
 from pulse import __version__
+from pulse.subprocesses import isolated_process_kwargs
 
 # ── Global console ────────────────────────────────────────────────────────────
 console = Console()
@@ -915,11 +916,12 @@ def _get_git_branch() -> str | None:
             capture_output=True,
             text=True,
             timeout=2,
+            **isolated_process_kwargs(),
         )
         if result.returncode == 0:
             branch = result.stdout.strip()
             return branch if branch and branch != "HEAD" else None
-    except (OSError, subprocess.CalledProcessError):
+    except (OSError, subprocess.SubprocessError):
         pass
     return None
 

@@ -38,6 +38,7 @@ from pulse.sandbox.secrets import (
     SecretPolicy,
     build_isolated_environment,
 )
+from pulse.subprocesses import isolated_process_kwargs, terminate_process
 
 
 class DockerBackend:
@@ -83,6 +84,7 @@ class DockerBackend:
             "label=pulse.sandbox.managed=true",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
+            **isolated_process_kwargs(),
         )
         stdout, _ = await proc.communicate()
         cids = stdout.decode().strip().split()
@@ -95,6 +97,7 @@ class DockerBackend:
                 *cids,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
+                **isolated_process_kwargs(),
             )
             await rm_proc.wait()
 
@@ -123,13 +126,12 @@ class DockerBackend:
                 "info",
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
+                **isolated_process_kwargs(),
             )
             await asyncio.wait_for(proc.wait(), timeout=10.0)
             return proc.returncode == 0
         except (OSError, TimeoutError):
-            if proc is not None and proc.returncode is None:
-                proc.kill()
-                await proc.wait()
+            await terminate_process(proc)
             return False
 
     def get_network_enforcement_capability(self, policy: NetworkPolicy) -> NetworkEnforcementLevel:
@@ -402,6 +404,7 @@ class DockerBackend:
                         *rm_cmd,
                         stdout=asyncio.subprocess.DEVNULL,
                         stderr=asyncio.subprocess.DEVNULL,
+                        **isolated_process_kwargs(),
                     )
                     await rm_proc.wait()
 

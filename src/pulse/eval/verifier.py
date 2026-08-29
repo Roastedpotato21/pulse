@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, TypedDict
 
+from pulse.subprocesses import isolated_process_kwargs
+
 TestResult = Literal["pass", "fail"]
 
 class PatchVerificationMetrics(TypedDict):
@@ -40,6 +42,7 @@ class PatchVerifier:
                 timeout=120,
                 check=False,
                 env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+                **isolated_process_kwargs(),
             )
             return proc.returncode, proc.stdout, proc.stderr
         except subprocess.TimeoutExpired as exc:
@@ -60,6 +63,7 @@ class PatchVerifier:
                     text=True,
                     timeout=30,
                     check=False,
+                    **isolated_process_kwargs(),
                 )
                 if proc.returncode != 0:
                     detail = proc.stderr.strip() or proc.stdout.strip() or "git apply failed"
