@@ -40,6 +40,7 @@ EXPECTED_RUNTIME_REQUIREMENTS = {
     "httpx==0.28.1",
     "keyring==25.7.0",
     "openai==2.44.0",
+    "prompt-toolkit==3.0.52",
     "python-dotenv==1.2.2",
     "rich==15.0.0",
     "typer==0.26.8",
