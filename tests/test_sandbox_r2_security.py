@@ -342,6 +342,11 @@ def test_docker_overlay_is_exported_before_container_exit(tmp_path: Path):
     wrapper_text = wrapper.read_text(encoding="utf-8")
     assert "cp -R /workspace-overlay/. /workspace-export/" in wrapper_text
     assert "cp -a" not in wrapper_text
+    assert "Pulse overlay copy failed" in wrapper_text
+    assert "Pulse overlay chmod failed" in wrapper_text
+    assert "Pulse export marker failed" in wrapper_text
+    assert "exit 74" in wrapper_text
+    assert "exit 125" not in wrapper_text
     assert ".pulse-export-complete" in wrapper_text
 
 

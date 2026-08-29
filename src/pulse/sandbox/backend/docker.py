@@ -456,9 +456,12 @@ class DockerBackend:
             # Do not use ``cp -a`` here. GNU cp tries to preserve metadata on
             # the bind-mount root itself, which a non-root container user
             # cannot chmod/chown, and turns every successful command into 125.
-            b'cp -R /workspace-overlay/. /workspace-export/ || exit 125\n'
-            b"find /workspace-export -mindepth 1 -exec chmod a+rwX {} \\; || exit 125\n"
-            b': > /workspace-export/.pulse-export-complete || exit 125\n'
+            b'cp -R /workspace-overlay/. /workspace-export/ || '
+            b'{ echo "Pulse overlay copy failed" >&2; exit 74; }\n'
+            b"find /workspace-export -mindepth 1 -exec chmod a+rwX {} \\; || "
+            b'{ echo "Pulse overlay chmod failed" >&2; exit 74; }\n'
+            b': > /workspace-export/.pulse-export-complete || '
+            b'{ echo "Pulse export marker failed" >&2; exit 74; }\n'
             b'exit "$status"\n'
         )
         fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o755)
