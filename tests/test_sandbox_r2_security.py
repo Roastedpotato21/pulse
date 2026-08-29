@@ -79,7 +79,7 @@ except KeyboardInterrupt:
         elif line.startswith("GRANDCHILD_PID="):
             grandchild_pid = int(line.split("=")[1])
             
-    if sys.platform != "win32" and grandchild_pid:
+    if grandchild_pid:
         # Verify the grandchild is dead. os.kill(pid, 0) raises OSError if dead.
         with pytest.raises(OSError):
             os.kill(grandchild_pid, 0)

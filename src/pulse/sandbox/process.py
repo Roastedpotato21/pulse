@@ -214,15 +214,38 @@ class ProcessManager:
             return
         try:
             if sys.platform == "win32":
-                # ``taskkill /T`` can itself hang in constrained Windows
-                # sessions.  Never let a helper process defeat the sandbox
-                # deadline.  Terminating the direct child is the reliable
-                # best-effort host fallback; container backends provide the
-                # strong tree-containment guarantee on Windows.
+                # CREATE_NEW_PROCESS_GROUP does not terminate descendants when
+                # the direct child is killed. Use taskkill's tree traversal,
+                # but bound the helper so it cannot defeat the sandbox timeout.
+                helper: asyncio.subprocess.Process | None = None
                 try:
-                    proc.kill()
-                    await asyncio.wait_for(proc.wait(), timeout=max(1.0, grace_seconds + 1.0))
-                except (ProcessLookupError, TimeoutError):
+                    helper = await asyncio.create_subprocess_exec(
+                        "taskkill",
+                        "/PID",
+                        str(proc.pid),
+                        "/T",
+                        "/F",
+                        stdout=asyncio.subprocess.DEVNULL,
+                        stderr=asyncio.subprocess.DEVNULL,
+                    )
+                    await asyncio.wait_for(
+                        helper.wait(), timeout=max(1.0, min(5.0, grace_seconds + 1.0))
+                    )
+                except (OSError, ProcessLookupError, TimeoutError):
+                    if helper is not None and helper.returncode is None:
+                        helper.kill()
+                        await helper.wait()
+
+                if proc.returncode is None:
+                    try:
+                        proc.kill()
+                    except ProcessLookupError:
+                        pass
+                try:
+                    await asyncio.wait_for(
+                        proc.wait(), timeout=max(1.0, grace_seconds + 1.0)
+                    )
+                except TimeoutError:
                     logger.warning("Timed out reaping Windows process rooted at %s.", proc.pid)
                 return
 
