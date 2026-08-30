@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from pulse.config import ModelConfig, load_env_file
+from pulse.config import ModelConfig
 from pulse.providers.anthropic import AnthropicProvider
 from pulse.providers.base import BaseProvider
 from pulse.providers.deepseek import DeepSeekProvider
@@ -121,22 +122,27 @@ class ProviderManager:
     def __init__(self, workspace: Path) -> None:
         self.workspace = workspace.resolve()
         self.config_file = self.workspace / ".agent" / "provider.json"
+        try:
+            self.config_file.resolve().relative_to(self.workspace)
+        except ValueError as error:
+            raise ValueError("Provider configuration must remain inside the workspace.") from error
 
     def list_providers(self) -> list[dict[str, Any]]:
-        env_file = self.workspace / ".env"
-        env = load_env_file(env_file) if env_file.exists() else {}
+        from pulse.provider_keys import ProviderKeyStore
+
+        statuses = {
+            status.provider: status
+            for status in ProviderKeyStore(self.workspace).statuses()
+        }
         result = []
         for spec in PROVIDER_SPECS.values():
-            key_val = os.environ.get(spec.env_var) or env.get(spec.env_var)
-            is_configured = bool(
-                key_val and key_val.strip() and key_val != "replace_me"
-            )
             result.append(
                 {
                     "key": spec.key,
                     "display_name": spec.display_name,
                     "env_var": spec.env_var,
-                    "configured": is_configured,
+                    "configured": statuses[spec.key].configured,
+                    "key_source": statuses[spec.key].source,
                     "default_model": spec.default_model,
                     "models": spec.available_models,
                 }
@@ -173,6 +179,8 @@ class ProviderManager:
     def get_active_selection(self) -> tuple[str, str]:
         """Return (provider_name, model_name) stored in .agent/provider.json or default."""
         if self.config_file.exists():
+            if self.config_file.is_symlink() or self.config_file.stat().st_size > 1_048_576:
+                return "openrouter", PROVIDER_SPECS["openrouter"].default_model
             try:
                 data = json.loads(self.config_file.read_text(encoding="utf-8"))
                 provider = data.get("provider")
@@ -207,14 +215,38 @@ class ProviderManager:
     ) -> tuple[str, str]:
         spec = self.get_provider_spec(provider_name)
         selected_model = (model_name or spec.default_model).strip()
+        if not selected_model or len(selected_model) > 256 or any(
+            ord(character) < 32 for character in selected_model
+        ):
+            raise ValueError("Model identifiers must be 1-256 characters without controls.")
 
         self.config_file.parent.mkdir(parents=True, exist_ok=True)
+        if self.config_file.parent.is_symlink() or self.config_file.is_symlink():
+            raise ValueError("Refusing to write provider configuration through a symbolic link.")
         data = {
             "schema_version": 1,
             "provider": spec.key,
             "model": selected_model,
         }
-        self.config_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        temporary_name: str | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                newline="\n",
+                prefix=".provider-",
+                suffix=".tmp",
+                dir=self.config_file.parent,
+                delete=False,
+            ) as temporary:
+                temporary_name = temporary.name
+                json.dump(data, temporary, indent=2)
+                temporary.write("\n")
+            os.replace(temporary_name, self.config_file)
+            temporary_name = None
+        finally:
+            if temporary_name:
+                Path(temporary_name).unlink(missing_ok=True)
         return spec.key, selected_model
 
     def create_provider(

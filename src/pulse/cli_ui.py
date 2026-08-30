@@ -387,7 +387,7 @@ def print_provider_changed_card(
     status_str = (
         f"[green]{_ok()} {env_var} Configured[/green]"
         if is_configured
-        else f"[yellow]{_warn()} {env_var} Missing (Set in environment or .env)[/yellow]"
+        else f"[yellow]{_warn()} {env_var} Missing (Run pulse keys)[/yellow]"
     )
 
     inner = Table.grid(padding=(0, 1))
@@ -771,8 +771,10 @@ _HELP_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
     ]),
     ("Configuration", [
         ("pulse version",                  "Show the installed Pulse version"),
+        ("pulse keys",                     "Open secure provider-key manager"),
         ("pulse keys list",                "Show provider key status without values"),
-        ("pulse keys set PROVIDER",        "Securely set or rotate a provider key"),
+        ("pulse keys set PROVIDER",        "Securely store a provider key"),
+        ("pulse keys rotate PROVIDER",     "Securely replace a provider key"),
         ("pulse keys remove PROVIDER",     "Remove a workspace provider key"),
         ("pulse model",                    "Interactive AI provider & model manager"),
         ("pulse model current",            "Display active AI provider & model details"),

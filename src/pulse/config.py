@@ -2,9 +2,23 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+_MAX_ENV_FILE_BYTES = 1_048_576
+_MAX_CONFIG_FILE_BYTES = 1_048_576
+_ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _workspace_path(workspace: Path, value: object, label: str) -> Path:
+    candidate = (workspace / str(value)).resolve()
+    try:
+        candidate.relative_to(workspace.resolve())
+    except ValueError as error:
+        raise ValueError(f"{label} must remain inside the workspace.") from error
+    return candidate
 
 
 @dataclass(frozen=True)
@@ -92,9 +106,9 @@ def load_agent_config(workspace: Path) -> AgentConfig:
             max_tokens=max_tokens,
         ),
         sandbox=SandboxConfig(
-            workspace_root=(
-                workspace / sandbox_raw.get("workspaceRoot", ".")
-            ).resolve(),
+            workspace_root=_workspace_path(
+                workspace, sandbox_raw.get("workspaceRoot", "."), "sandbox.workspaceRoot"
+            ),
             require_permission_for_reads=bool(
                 sandbox_raw.get("requirePermissionForReads", True)
             ),
@@ -104,13 +118,16 @@ def load_agent_config(workspace: Path) -> AgentConfig:
             allow_writes=bool(sandbox_raw.get("allowWrites", False)),
         ),
         logging=LoggingConfig(
-            action_log=(
-                workspace / logging_raw.get("actionLog", ".agent/logs/actions.jsonl")
-            ).resolve(),
-            telemetry_log=(
-                workspace
-                / logging_raw.get("telemetryLog", ".agent/logs/telemetry.jsonl")
-            ).resolve(),
+            action_log=_workspace_path(
+                workspace,
+                logging_raw.get("actionLog", ".agent/logs/actions.jsonl"),
+                "logging.actionLog",
+            ),
+            telemetry_log=_workspace_path(
+                workspace,
+                logging_raw.get("telemetryLog", ".agent/logs/telemetry.jsonl"),
+                "logging.telemetryLog",
+            ),
         ),
     )
 
@@ -118,6 +135,10 @@ def load_agent_config(workspace: Path) -> AgentConfig:
 def load_env_file(path: Path) -> dict[str, str]:
     if not path.exists():
         return {}
+    if path.is_symlink():
+        raise ValueError("Refusing to load a symbolic-link .env file.")
+    if path.stat().st_size > _MAX_ENV_FILE_BYTES:
+        raise ValueError("The .env file exceeds the 1 MiB safety limit.")
 
     values: dict[str, str] = {}
     for line in path.read_text(encoding="utf-8").splitlines():
@@ -127,10 +148,10 @@ def load_env_file(path: Path) -> dict[str, str]:
 
         key, value = stripped.split("=", 1)
         k = key.strip()
+        if not _ENV_NAME.fullmatch(k):
+            continue
         v = value.strip().strip("\"'")
         values[k] = v
-        if k not in os.environ:
-            os.environ[k] = v
 
     return values
 
@@ -138,5 +159,9 @@ def load_env_file(path: Path) -> dict[str, str]:
 def _read_json(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
+    if path.is_symlink():
+        raise ValueError(f"Refusing to load symbolic-link configuration: {path.name}")
+    if path.stat().st_size > _MAX_CONFIG_FILE_BYTES:
+        raise ValueError(f"Configuration file exceeds the 1 MiB safety limit: {path.name}")
 
     return json.loads(path.read_text(encoding="utf-8"))

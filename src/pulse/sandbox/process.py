@@ -138,7 +138,18 @@ class ProcessManager:
                 clean_stdout += marker
             else:
                 clean_stderr += marker
-        return ProcessResult(cmd_str, exit_code, clean_stdout, clean_stderr, metrics.elapsed_ms, reason == "timeout", stdout_truncated or stderr_truncated or reason == "output_limit", proc.pid if proc else None, metrics=metrics, termination_reason=reason)
+        return ProcessResult(
+            cmd_str,
+            exit_code,
+            clean_stdout,
+            clean_stderr,
+            metrics.elapsed_ms,
+            reason == "timeout",
+            stdout_truncated or stderr_truncated or reason == "output_limit",
+            getattr(proc, "pid", None) if proc else None,
+            metrics=metrics,
+            termination_reason=reason,
+        )
 
     async def _collect_output(self, proc: asyncio.subprocess.Process, max_bytes: int, output_callback: typing.Callable[[str, bytes], typing.Awaitable[None]] | None = None, captured: dict[str, bytearray] | None = None) -> tuple[bytes, bytes, bool]:
         chunks = captured or {"stdout": bytearray(), "stderr": bytearray()}

@@ -40,6 +40,12 @@ def test_release_artifact_accepts_package_files() -> None:
     )
 
 
+@pytest.mark.parametrize("name", ["../outside.py", "/absolute.py", "pkg/../../outside.py"])
+def test_release_artifact_rejects_path_traversal(name: str) -> None:
+    with pytest.raises(ValueError, match="forbidden release files"):
+        _validate_names(Path("artifact.whl"), [name])
+
+
 def test_invalid_wheel_is_rejected(tmp_path: Path) -> None:
     wheel = tmp_path / "invalid.whl"
     with zipfile.ZipFile(wheel, mode="w") as archive:

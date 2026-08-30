@@ -2,11 +2,32 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shlex
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from pulse.subprocesses import isolated_process_kwargs, terminate_process
 from pulse.tool_registry import ToolInvocation, ToolRegistry, ToolResult
+
+MCP_MAX_CONFIG_BYTES = 1_048_576
+MCP_MAX_TOOL_NAME_CHARS = 128
+
+
+def _split_stdio_command(command: str) -> list[str]:
+    try:
+        parts = shlex.split(command, posix=False)
+    except ValueError:
+        return []
+    return [part for part in parts if part]
+
+
+def _is_loopback_http_endpoint(endpoint: str) -> bool:
+    parsed = urlparse(endpoint)
+    if parsed.scheme not in {"http", "https"}:
+        return False
+    host = (parsed.hostname or "").lower()
+    return host in {"127.0.0.1", "::1", "localhost"}
 
 
 class _MCPTool:
@@ -38,7 +59,9 @@ class _MCPTool:
         return await self._call_http(params)
 
     async def _call_stdio(self, params: dict[str, Any]) -> ToolResult:
-        cmd = self._endpoint.split()
+        cmd = _split_stdio_command(self._endpoint)
+        if not cmd:
+            return ToolResult("MCP stdio command is invalid.", metadata={"error": "invalid_command"})
         payload = json.dumps({"method": self.name, "params": params}) + "\n"
         process: asyncio.subprocess.Process | None = None
         try:
@@ -63,14 +86,16 @@ class _MCPTool:
             await terminate_process(process)
             raise
         # Intentionally broad to isolate execution boundaries and prevent crashes.
-        except Exception as exc:  # noqa: BLE001
-            return ToolResult(f"MCP tool '{self.name}' error: {exc}", metadata={"error": str(exc)})
+        except Exception:  # noqa: BLE001
+            return ToolResult("MCP tool failed.", metadata={"error": "execution_failed"})
 
     async def _call_http(self, params: dict[str, Any]) -> ToolResult:
         try:
             import httpx
         except ImportError:
             return ToolResult("httpx is required for HTTP MCP transport.", metadata={"error": "missing_dependency"})
+        if not _is_loopback_http_endpoint(self._endpoint):
+            return ToolResult("MCP HTTP endpoint must be loopback.", metadata={"error": "endpoint_not_allowed"})
 
         payload = {"jsonrpc": "2.0", "id": 1, "method": self.name, "params": params}
         try:
@@ -80,8 +105,8 @@ class _MCPTool:
                 content = data.get("result") or data.get("content") or str(data)
                 return ToolResult(str(content), metadata={"server": self._server_name, "transport": "http"})
         # Intentionally broad to isolate execution boundaries and prevent crashes.
-        except Exception as exc:  # noqa: BLE001
-            return ToolResult(f"MCP tool '{self.name}' error: {exc}", metadata={"error": str(exc)})
+        except Exception:  # noqa: BLE001
+            return ToolResult("MCP tool failed.", metadata={"error": "execution_failed"})
 
 
 class MCPClientManager:
@@ -97,8 +122,11 @@ class MCPClientManager:
     def _load_mcp_servers(self) -> list[dict[str, Any]]:
         if not self._config_path.exists():
             return []
+        if self._config_path.is_symlink() or self._config_path.stat().st_size > MCP_MAX_CONFIG_BYTES:
+            return []
         raw: dict[str, Any] = json.loads(self._config_path.read_text(encoding="utf-8"))
-        return list(raw.get("mcp_servers", []))
+        servers = raw.get("mcp_servers", [])
+        return servers if isinstance(servers, list) else []
 
     async def discover_and_register_tools(self) -> int:
         """Probe each configured MCP server for its tool manifest and register all tools.
@@ -108,10 +136,13 @@ class MCPClientManager:
         servers = self._load_mcp_servers()
         registered = 0
         for server in servers:
-            server_name: str = server.get("name", "unnamed")
-            transport: str = server.get("transport", "stdio").lower()
-            endpoint: str = server.get("endpoint", "")
-            tools_manifest: list[dict[str, Any]] = server.get("tools", [])
+            if not isinstance(server, dict):
+                continue
+            server_name = str(server.get("name", "unnamed"))[:MCP_MAX_TOOL_NAME_CHARS]
+            transport = str(server.get("transport", "stdio")).lower()
+            endpoint = str(server.get("endpoint", ""))
+            raw_tools_manifest = server.get("tools", [])
+            tools_manifest = raw_tools_manifest if isinstance(raw_tools_manifest, list) else []
 
             if not tools_manifest and transport == "http" and endpoint:
                 tools_manifest = await self._probe_http_manifest(endpoint)
@@ -119,7 +150,10 @@ class MCPClientManager:
                 tools_manifest = await self._probe_stdio_manifest(endpoint)
 
             for tool_def in tools_manifest:
-                tool_name = f"{server_name}.{tool_def.get('name', 'unknown')}"
+                if not isinstance(tool_def, dict):
+                    continue
+                tool_leaf = str(tool_def.get("name", "unknown"))[:MCP_MAX_TOOL_NAME_CHARS]
+                tool_name = f"{server_name}.{tool_leaf}"
                 description = tool_def.get("description", f"MCP tool from {server_name}")
                 tool = _MCPTool(
                     name=tool_name,
@@ -137,6 +171,8 @@ class MCPClientManager:
         return registered
 
     async def _probe_http_manifest(self, endpoint: str) -> list[dict[str, Any]]:
+        if not _is_loopback_http_endpoint(endpoint):
+            return []
         try:
             import httpx
             async with httpx.AsyncClient(timeout=10) as client:
@@ -150,7 +186,9 @@ class MCPClientManager:
         return []
 
     async def _probe_stdio_manifest(self, command: str) -> list[dict[str, Any]]:
-        cmd = command.split()
+        cmd = _split_stdio_command(command)
+        if not cmd:
+            return []
         payload = json.dumps({"method": "tools/list", "params": {}}) + "\n"
         process: asyncio.subprocess.Process | None = None
         try:

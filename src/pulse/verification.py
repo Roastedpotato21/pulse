@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-import asyncio
 import sys
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from pulse.subprocesses import isolated_process_kwargs, terminate_process
+from pulse.sandbox.process import ProcessManager
+from pulse.sandbox.resources import ResourcePolicy
+from pulse.subprocesses import isolated_subprocess_environment
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,17 +105,14 @@ class VerificationEngine:
 
     @staticmethod
     async def _run_command(command: tuple[str, ...], workspace: Path) -> tuple[int, str, str]:
-        process: asyncio.subprocess.Process | None = None
-        try:
-            process = await asyncio.create_subprocess_exec(
-                *command, cwd=workspace, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-                **isolated_process_kwargs(),
-            )
-        except OSError as error:
-            return 127, "", str(error)
-        try:
-            stdout, stderr = await process.communicate()
-        except asyncio.CancelledError:
-            await terminate_process(process)
-            raise
-        return process.returncode, stdout.decode(errors="replace"), stderr.decode(errors="replace")
+        result = await ProcessManager().execute(
+            list(command),
+            cwd=workspace,
+            env=isolated_subprocess_environment(),
+            limits=ResourcePolicy(
+                wall_time_seconds=600,
+                max_output_bytes=5_242_880,
+            ),
+            apply_native_limits=False,
+        )
+        return result.exit_code, result.stdout, result.stderr

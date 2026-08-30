@@ -16,6 +16,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from pulse.sandbox.secrets import SecretScrubber
 from pulse.storage import migrate_database
 
 CONVERSATION_SCHEMA_VERSION = 1
@@ -56,6 +57,7 @@ class ConversationManager:
         self.database_path = (
             database_path or self.workspace / ".agent" / "conversations.sqlite3"
         )
+        self._scrubber = SecretScrubber()
         self._ensure_schema()
 
     # ------------------------------------------------------------------
@@ -100,7 +102,7 @@ class ConversationManager:
         """Create a new conversation and set it as the active one."""
         conv_id = str(uuid.uuid4())
         now = datetime.now(UTC).isoformat()
-        display_title = title or "New Conversation"
+        display_title = self._scrubber.redact(title or "New Conversation")
         with self._connect() as conn:
             conn.execute(
                 "INSERT INTO conversations(id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
@@ -112,7 +114,7 @@ class ConversationManager:
     def auto_title(self, conv_id: str, first_message: str) -> Conversation:
         """Generate a tidy title from the first user message (≤ 60 chars)."""
         # Strip punctuation/whitespace, take first 60 chars, capitalize
-        cleaned = re.sub(r"\s+", " ", first_message.strip())
+        cleaned = re.sub(r"\s+", " ", self._scrubber.redact(first_message).strip())
         title = cleaned[:60].rstrip(" ,.:;!?")
         if len(cleaned) > 60:
             title += "…"
@@ -142,7 +144,7 @@ class ConversationManager:
         return [Conversation(id=r[0], title=r[1], created_at=r[2], updated_at=r[3], turn_count=r[4]) for r in rows]
 
     def rename(self, conv_id: str, new_title: str) -> Conversation:
-        new_title = new_title.strip() or "Untitled"
+        new_title = self._scrubber.redact(new_title).strip() or "Untitled"
         now = datetime.now(UTC).isoformat()
         with self._connect() as conn:
             conn.execute(
@@ -182,6 +184,7 @@ class ConversationManager:
     # ------------------------------------------------------------------
 
     def add_turn(self, conv_id: str, role: str, content: str) -> ConversationTurn:
+        content = self._scrubber.redact(content)
         now = datetime.now(UTC).isoformat()
         with self._connect() as conn:
             cursor = conn.execute(

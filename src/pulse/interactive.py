@@ -13,9 +13,18 @@ from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.document import Document
 from prompt_toolkit.formatted_text import HTML, FormattedText
 from prompt_toolkit.history import FileHistory, InMemoryHistory
+from prompt_toolkit.input import Input
 from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.output import Output
 from prompt_toolkit.shortcuts import CompleteStyle
 from prompt_toolkit.styles import Style
+
+_SHELL_COMMAND_HELP = {
+    "help": "Show all Pulse commands and usage examples.",
+    "clear": "Clear the terminal screen.",
+    "exit": "End the interactive Pulse session.",
+}
+_ROOT_COMMAND_PRIORITY = ("help", "status", "model", "keys", "clear", "exit")
 
 _STYLE = Style.from_dict(
     {
@@ -83,12 +92,21 @@ class SlashCommandCompleter(Completer):
         candidates: dict[str, str] = {}
         subcommands = _subparsers(parser)
         if subcommands:
-            candidates.update(_command_help(subcommands))
-        for action in parser._actions:
-            if action.help == argparse.SUPPRESS:
-                continue
-            for option in action.option_strings:
-                candidates[option] = action.help or ""
+            command_help = _command_help(subcommands)
+            if parser is self.parser:
+                root_help = {**command_help, **_SHELL_COMMAND_HELP}
+                for command in _ROOT_COMMAND_PRIORITY:
+                    candidates[command] = root_help[command]
+                for command, description in root_help.items():
+                    candidates.setdefault(command, description)
+            else:
+                candidates.update(command_help)
+        if parser is not self.parser:
+            for action in parser._actions:
+                if action.help == argparse.SUPPRESS:
+                    continue
+                for option in action.option_strings:
+                    candidates[option] = action.help or ""
 
         root_position = parser is self.parser and not consumed
         for value, description in candidates.items():
@@ -117,13 +135,6 @@ def build_key_bindings() -> KeyBindings:
     @bindings.add("c-space")
     def _complete(event: object) -> None:
         event.current_buffer.start_completion(select_first=False)  # type: ignore[attr-defined]
-
-    @bindings.add("/")
-    def _open_command_menu(event: object) -> None:
-        buffer = event.current_buffer  # type: ignore[attr-defined]
-        buffer.insert_text("/")
-        if buffer.text == "/":
-            buffer.start_completion(select_first=False)
 
     @bindings.add("tab")
     def _tab_complete(event: object) -> None:
@@ -155,7 +166,14 @@ def build_key_bindings() -> KeyBindings:
 class InteractivePrompt:
     """A reusable, testable prompt session with completion and safe history."""
 
-    def __init__(self, workspace: Path, parser: argparse.ArgumentParser) -> None:
+    def __init__(
+        self,
+        workspace: Path,
+        parser: argparse.ArgumentParser,
+        *,
+        input: Input | None = None,
+        output: Output | None = None,
+    ) -> None:
         history_dir = workspace / ".pulse"
         try:
             history_dir.mkdir(parents=True, exist_ok=True)
@@ -173,13 +191,18 @@ class InteractivePrompt:
             complete_in_thread=False,
             complete_style=CompleteStyle.COLUMN,
             reserve_space_for_menu=12,
-            enable_history_search=True,
+            # prompt-toolkit disables live completion when history-prefix
+            # search is enabled. Ctrl-R and ordinary Up/Down history remain
+            # available without this conflicting option.
+            enable_history_search=False,
             multiline=True,
             prompt_continuation=lambda width, line, wrap: " " * max(0, width - 2) + "· ",
             bottom_toolbar=HTML(
                 " <b>Tab</b> complete  <b>↑↓</b> history  <b>Ctrl-R</b> search  "
                 "<b>Alt-Enter</b> newline  <b>Ctrl-C</b> clear  <b>/help</b> commands "
             ),
+            input=input,
+            output=output,
         )
 
     def read(self, conversation: str) -> str:

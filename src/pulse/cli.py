@@ -7,6 +7,7 @@ import io
 import json
 import shutil
 import sys
+import warnings
 from pathlib import Path
 
 from rich.table import Table
@@ -79,14 +80,18 @@ def _build_parser() -> argparse.ArgumentParser:
     model_parser.add_argument("model", nargs="?", default=None, help="Model identifier")
 
     keys_parser = subparsers.add_parser(
-        "keys", help="Safely list, set, or remove provider API keys."
+        "keys", help="Securely manage provider API keys in the OS credential vault."
     )
-    keys_subparsers = keys_parser.add_subparsers(dest="keys_command", required=True)
+    keys_subparsers = keys_parser.add_subparsers(dest="keys_command")
     keys_subparsers.add_parser("list", help="Show provider key configuration without values.")
     keys_set = keys_subparsers.add_parser("set", help="Securely prompt for a provider API key.")
     keys_set.add_argument("provider", help="Provider name")
+    keys_rotate = keys_subparsers.add_parser(
+        "rotate", help="Securely replace a configured provider API key."
+    )
+    keys_rotate.add_argument("provider", help="Provider name")
     keys_remove = keys_subparsers.add_parser(
-        "remove", help="Remove a provider key from the workspace .env."
+        "remove", help="Remove a provider key from secure local storage."
     )
     keys_remove.add_argument("provider", help="Provider name")
 
@@ -186,7 +191,7 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: list[str] | None = None) -> None:
+def _run_main(argv: list[str] | None = None) -> None:
     set_correlation_id()
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -203,7 +208,8 @@ def main(argv: list[str] | None = None) -> None:
     if args.command in {"login", "logout", "whoami", "auth-status"}:
         auth = AuthenticationManager(workspace)
         if args.command == "login":
-            _handle_login_command()
+            if _handle_login_command():
+                _run_provider_onboarding(workspace)
         elif args.command == "logout":
             auth.logout()
             print_success("Signed out and cleared the stored session.")
@@ -419,7 +425,23 @@ def _handle_model_command(
         )
         return
 
-    # Interactive Model Manager: pulse model
+    selection = _prompt_provider_and_model(pm)
+    if selection is None:
+        return
+    chosen_key, chosen_model = selection
+    spec = pm.get_provider_spec(chosen_key)
+    saved_prov, saved_mod = pm.save_selection(chosen_key, chosen_model)
+    providers_status = {p["key"]: p["configured"] for p in pm.list_providers()}
+    print_provider_changed_card(
+        spec.display_name,
+        saved_mod,
+        spec.env_var,
+        providers_status.get(saved_prov, False),
+    )
+
+
+def _prompt_provider_and_model(pm: ProviderManager) -> tuple[str, str] | None:
+    """Prompt for one provider/model pair without saving partial selection."""
     active_prov, active_mod, warning = pm.validate_active_selection()
     if warning:
         print_warning(warning)
@@ -445,13 +467,13 @@ def _handle_model_command(
             chosen_key = providers[idx - 1]["key"]
         else:
             print_error("Invalid provider selection index.")
-            sys.exit(1)
+            return None
     else:
         try:
             chosen_key = pm.get_provider_spec(selection).key
         except ValueError as error:
             print_error(str(error))
-            sys.exit(1)
+            return None
 
     spec = pm.get_provider_spec(chosen_key)
     print_model_selection(
@@ -477,7 +499,7 @@ def _handle_model_command(
             chosen_model = spec.available_models[m_idx - 1].name
         else:
             print_error("Invalid model selection index.")
-            sys.exit(1)
+            return None
     elif model_choice.lower() == "c":
         try:
             chosen_model = input("Enter custom model identifier: ").strip()
@@ -489,28 +511,23 @@ def _handle_model_command(
     else:
         chosen_model = model_choice
 
-    saved_prov, saved_mod = pm.save_selection(chosen_key, chosen_model)
-    providers_status = {p["key"]: p["configured"] for p in pm.list_providers()}
-    print_provider_changed_card(
-        spec.display_name,
-        saved_mod,
-        spec.env_var,
-        providers_status.get(saved_prov, False),
-    )
+    return chosen_key, chosen_model
 
 
-def _handle_login_command() -> None:
+def _handle_login_command() -> bool:
     """Handle `pulse login` experience."""
     if is_authenticated():
         user = get_current_user()
         email = user.email if user else "user"
         print_success(f"Already signed in as {email}.")
-        return
+        return False
 
     try:
         user = login()
         if user:
             print_signed_in(user.name, user.email)
+            return True
+        return False
     except UserCancelledError:
         print_error("Authentication was cancelled in the browser.")
         sys.exit(1)
@@ -532,40 +549,173 @@ def _handle_login_command() -> None:
         sys.exit(1)
 
 
+def _run_provider_onboarding(workspace: Path) -> bool:
+    """Connect a provider/model/key immediately after successful login."""
+    print_info("Authentication complete. Connect your BYOK model provider.")
+    manager = ProviderManager(workspace)
+    selection = _prompt_provider_and_model(manager)
+    if selection is None:
+        print_warning("Provider setup skipped. Run /keys or /model at any time.")
+        return False
+
+    provider, model = selection
+    store = ProviderKeyStore(workspace)
+    status = next(item for item in store.statuses() if item.provider == provider)
+    if status.configured:
+        print_info(
+            f"Using the existing {provider} credential from {status.source}."
+        )
+    elif not _prompt_and_store_provider_key(store, provider, rotating=False):
+        print_warning("Provider setup was not saved because no key was stored.")
+        return False
+
+    saved_provider, saved_model = manager.save_selection(provider, model)
+    spec = manager.get_provider_spec(saved_provider)
+    print_provider_changed_card(
+        spec.display_name,
+        saved_model,
+        spec.env_var,
+        True,
+    )
+    print_success("BYOK setup complete. Your next message will use this provider.")
+    return True
+
+
+def _active_provider_has_key(workspace: Path) -> bool:
+    manager = ProviderManager(workspace)
+    active_provider, _ = manager.get_active_selection()
+    return any(
+        status.provider == active_provider and status.configured
+        for status in ProviderKeyStore(workspace).statuses()
+    )
+
+
+def _read_hidden_provider_key(provider: str) -> str | None:
+    """Read a secret only when the terminal can suppress input echo."""
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", getpass.GetPassWarning)
+            return getpass.getpass(f"Enter the {provider} API key (input hidden): ")
+    except getpass.GetPassWarning:
+        print_error(
+            "Secure hidden input is unavailable in this terminal; the key was not read."
+        )
+    except (KeyboardInterrupt, EOFError):
+        print_warning("API key entry cancelled.")
+    return None
+
+
+def _prompt_and_store_provider_key(
+    store: ProviderKeyStore, provider: str, *, rotating: bool
+) -> bool:
+    value = _read_hidden_provider_key(provider)
+    if value is None:
+        return False
+    try:
+        variable = store.rotate(provider, value) if rotating else store.set(provider, value)
+    except ProviderKeyError as error:
+        print_error(str(error))
+        return False
+    action = "Rotated" if rotating else "Stored"
+    print_success(f"{action} {variable} in the OS credential vault.")
+    return True
+
+
+def _print_provider_key_statuses(store: ProviderKeyStore) -> None:
+    table = Table(title="Provider API keys (secret values are never displayed)")
+    table.add_column("#", justify="right", style="dim")
+    table.add_column("Provider", style="cyan")
+    table.add_column("Environment variable")
+    table.add_column("State")
+    table.add_column("Source")
+    for index, status in enumerate(store.statuses(), 1):
+        table.add_row(
+            str(index),
+            status.provider,
+            status.environment_variable,
+            "Configured" if status.configured else "Missing",
+            status.source,
+        )
+    print_cli_output(table, title="Provider keys")
+
+
+def _run_keys_manager(workspace: Path) -> None:
+    """Interactive provider-key status, rotation, and removal manager."""
+    store = ProviderKeyStore(workspace)
+    while True:
+        _print_provider_key_statuses(store)
+        statuses = store.statuses()
+        try:
+            choice = input(
+                "Select provider number or key to manage [Enter exits]: "
+            ).strip().lower()
+        except (KeyboardInterrupt, EOFError):
+            print("\nKey manager closed.")
+            return
+        if not choice:
+            return
+        if choice.isdigit() and 1 <= int(choice) <= len(statuses):
+            status = statuses[int(choice) - 1]
+        else:
+            status = next((item for item in statuses if item.provider == choice), None)
+            if status is None:
+                print_error("Unknown provider selection.")
+                continue
+
+        actions = "[R]otate  [D]elete  [Enter] back" if status.configured else "[S]et  [Enter] back"
+        try:
+            action = input(f"{status.provider}: {actions}: ").strip().lower()
+        except (KeyboardInterrupt, EOFError):
+            print("\nKey manager closed.")
+            return
+        if action in {"s", "set"} and not status.configured:
+            _prompt_and_store_provider_key(store, status.provider, rotating=False)
+        elif action in {"r", "rotate"} and status.configured:
+            _prompt_and_store_provider_key(store, status.provider, rotating=True)
+        elif action in {"d", "delete", "remove"} and status.configured:
+            confirm = input(
+                f"Remove the stored {status.provider} key? [y/N]: "
+            ).strip().lower()
+            if confirm in {"y", "yes"}:
+                variable, removed, environment_still_set = store.remove(status.provider)
+                if removed:
+                    print_success(f"Removed {variable} from secure local storage.")
+                if environment_still_set:
+                    print_warning(
+                        f"{variable} remains set by the process environment."
+                    )
+
+
 def _handle_keys_command(workspace: Path, args: object) -> None:
     """Handle provider keys without ever echoing secret values."""
     store = ProviderKeyStore(workspace)
     command = getattr(args, "keys_command", None)
     try:
+        if command is None:
+            _run_keys_manager(workspace)
+            return
+
         if command == "list":
-            table = Table(title="Provider API keys")
-            table.add_column("Provider", style="cyan")
-            table.add_column("Environment variable")
-            table.add_column("State")
-            table.add_column("Source")
-            for status in store.statuses():
-                table.add_row(
-                    status.provider,
-                    status.environment_variable,
-                    "Configured" if status.configured else "Missing",
-                    status.source,
-                )
-            print_cli_output(table, title="Provider keys")
+            _print_provider_key_statuses(store)
             return
 
         provider = str(getattr(args, "provider", ""))
-        if command == "set":
-            value = getpass.getpass(f"Enter the {provider} API key (input hidden): ")
-            variable = store.set(provider, value)
-            print_success(f"Updated {variable} in the ignored workspace .env file.")
+        if command in {"set", "rotate"}:
+            stored = _prompt_and_store_provider_key(
+                store,
+                provider,
+                rotating=command == "rotate",
+            )
+            if not stored:
+                raise SystemExit(2)
             return
 
         if command == "remove":
             variable, removed, environment_still_set = store.remove(provider)
             if removed:
-                print_success(f"Removed {variable} from the workspace .env file.")
+                print_success(f"Removed {variable} from secure local storage.")
             else:
-                print_warning(f"{variable} was not present in the workspace .env file.")
+                print_warning(f"{variable} was not present in managed storage.")
             if environment_still_set:
                 print_warning(
                     f"{variable} is still configured in the process environment; "
@@ -801,13 +951,22 @@ def _handle_interactive_mode(auth, agent, runtime=None) -> None:
         print_auth_prompt()
         answer = input("Sign in now with Google? [Y/n] ").strip().lower()
         if answer not in {"n", "no"}:
-            _handle_login_command()
+            if _handle_login_command():
+                _run_provider_onboarding(workspace)
+                runtime = build_runtime(workspace, load_agent_config(workspace))
+                agent = runtime.agent
         else:
             print_info("Continuing unauthenticated.")
     else:
         user = get_current_user()
         if user:
             print_signed_in(user.name, user.email)
+        if not _active_provider_has_key(workspace):
+            print_warning("The active model provider has no API key configured.")
+            answer = input("Configure BYOK now? [Y/n] ").strip().lower()
+            if answer not in {"n", "no"} and _run_provider_onboarding(workspace):
+                runtime = build_runtime(workspace, load_agent_config(workspace))
+                agent = runtime.agent
 
     # Show active conversation info
     print_chat_card(active_conv)
@@ -894,6 +1053,19 @@ def _handle_interactive_mode(auth, agent, runtime=None) -> None:
         except (KeyboardInterrupt, EOFError):
             print("\nExiting Pulse REPL.")
             break
+
+
+def main(argv: list[str] | None = None) -> None:
+    try:
+        _run_main(argv)
+    except SystemExit:
+        raise
+    except KeyboardInterrupt:
+        print_warning("Command cancelled.")
+        raise SystemExit(130) from None
+    except (EOFError, OSError, RuntimeError, ValueError, json.JSONDecodeError):
+        print_error("Pulse could not complete the request. Check configuration and inputs.")
+        raise SystemExit(1) from None
 
 
 if __name__ == "__main__":

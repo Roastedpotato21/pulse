@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
 import http.server
 import json
 import logging
@@ -155,11 +156,15 @@ def decode_jwt_payload(jwt_token: str) -> dict[str, Any]:
 # --- Secure Storage (Keyring + File Fallback) ---
 
 class SecureTokenStore:
-    """Secure credential store leveraging OS Keyring with file fallback."""
+    """Workspace-scoped credential storage backed only by the OS keyring."""
 
     def __init__(self, workspace: Path | None = None) -> None:
         self.workspace = (workspace or Path.cwd()).resolve()
         self.fallback_file = self.workspace / ".agent" / ".pulse-auth-session.json"
+        digest = hashlib.sha256(
+            os.path.normcase(str(self.workspace)).encode("utf-8")
+        ).hexdigest()[:24]
+        self.account_name = f"{KEYRING_ACCOUNT_NAME}:{digest}"
 
     def store_session(self, user: UserProfile, tokens: TokenSet) -> None:
         payload = json.dumps({
@@ -167,49 +172,32 @@ class SecureTokenStore:
             "tokens": tokens.to_dict(),
         })
 
-        stored_in_keyring = False
-        if keyring is not None:
+        if keyring is None:
+            raise AuthError("The OS credential vault is unavailable; the session was not stored.")
+        try:
+            keyring.set_password(KEYRING_SERVICE_NAME, self.account_name, payload)
+            persisted = keyring.get_password(KEYRING_SERVICE_NAME, self.account_name)
+        except Exception as error:
+            logger.debug("OS credential vault storage failed.")
+            raise AuthError(
+                "The OS credential vault rejected the session; no plaintext fallback was written."
+            ) from error
+        if not persisted or not hmac.compare_digest(persisted, payload):
+            raise AuthError("The OS credential vault did not confirm session persistence.")
+        if self.fallback_file.exists():
             try:
-                keyring.set_password(KEYRING_SERVICE_NAME, KEYRING_ACCOUNT_NAME, payload)
-                stored_in_keyring = True
-            # Platform keyring adapters may surface native credential-manager
-            # exceptions that are not subclasses of KeyringError (notably
-            # WinError 1312 in non-interactive Windows sessions).  The
-            # workspace fallback is the supported recovery path.
-            except Exception as err:  # noqa: BLE001
-                logger.debug(f"Keyring store unavailable: {err}")
-                stored_in_keyring = False
-
-        if not stored_in_keyring:
-            self.fallback_file.parent.mkdir(parents=True, exist_ok=True)
-            with open(self.fallback_file, "w", encoding="utf-8") as f:
-                f.write(payload)
-            try:
-                os.chmod(self.fallback_file, 0o600)
+                self.fallback_file.unlink()
             except OSError:
-                pass
-        else:
-            if self.fallback_file.exists():
-                try:
-                    self.fallback_file.unlink()
-                except OSError:
-                    pass
+                logger.warning("A legacy plaintext authentication file could not be removed.")
 
     def load_session(self) -> tuple[UserProfile, TokenSet] | None:
         raw_payload: str | None = None
 
         if keyring is not None:
             try:
-                raw_payload = keyring.get_password(KEYRING_SERVICE_NAME, KEYRING_ACCOUNT_NAME)
-            except Exception as err:  # noqa: BLE001
-                logger.debug(f"Keyring load unavailable: {err}")
-                raw_payload = None
-
-        if not raw_payload and self.fallback_file.exists():
-            try:
-                with open(self.fallback_file, "r", encoding="utf-8") as f:
-                    raw_payload = f.read()
-            except OSError:
+                raw_payload = keyring.get_password(KEYRING_SERVICE_NAME, self.account_name)
+            except Exception:  # noqa: BLE001
+                logger.debug("OS credential vault load failed.")
                 raw_payload = None
 
         if not raw_payload:
@@ -228,9 +216,9 @@ class SecureTokenStore:
     def clear_session(self) -> None:
         if keyring is not None:
             try:
-                keyring.delete_password(KEYRING_SERVICE_NAME, KEYRING_ACCOUNT_NAME)
-            except Exception as err:  # noqa: BLE001
-                logger.debug(f"Keyring clear ignored: {err}")
+                keyring.delete_password(KEYRING_SERVICE_NAME, self.account_name)
+            except Exception:  # noqa: BLE001
+                logger.debug("OS credential vault clear was unavailable.")
 
         if self.fallback_file.exists():
             try:
@@ -342,39 +330,30 @@ class SingleRequestHTTPServer(socketserver.TCPServer):
 # --- OAuth Client Helper ---
 
 def get_google_config() -> dict[str, str]:
-    """Retrieve Google OAuth Client configuration using os.getenv, dotenv, or .env fallback."""
+    """Retrieve only the OAuth values Pulse recognizes, without mutating the process."""
+    from pulse.config import load_env_file
+
     try:
-        from dotenv import load_dotenv
-        load_dotenv(Path.cwd() / ".env")
-    except ImportError:
-        pass
-
-    client_id = os.getenv("GOOGLE_CLIENT_ID") or os.environ.get("GOOGLE_CLIENT_ID", "")
-    client_secret = os.getenv("GOOGLE_CLIENT_SECRET") or os.environ.get("GOOGLE_CLIENT_SECRET", "")
-    redirect_uri = os.getenv("GOOGLE_REDIRECT_URI") or os.environ.get("GOOGLE_REDIRECT_URI", "http://localhost:8080")
-
-    if not client_id or not client_secret:
-        env_path = Path.cwd() / ".env"
-        if env_path.exists():
-            try:
-                for line in env_path.read_text(encoding="utf-8").splitlines():
-                    stripped = line.strip()
-                    if not stripped or stripped.startswith("#") or "=" not in stripped:
-                        continue
-                    k, v = stripped.split("=", 1)
-                    k = k.strip()
-                    v = v.strip().strip("\"'")
-                    if k == "GOOGLE_CLIENT_ID" and not client_id:
-                        client_id = v
-                        os.environ["GOOGLE_CLIENT_ID"] = v
-                    elif k == "GOOGLE_CLIENT_SECRET" and not client_secret:
-                        client_secret = v
-                        os.environ["GOOGLE_CLIENT_SECRET"] = v
-                    elif k == "GOOGLE_REDIRECT_URI" and (not redirect_uri or redirect_uri == "http://localhost:8080"):
-                        redirect_uri = v
-                        os.environ["GOOGLE_REDIRECT_URI"] = v
-            except (OSError, ValueError):
-                pass
+        file_values = load_env_file(Path.cwd() / ".env")
+    except (OSError, UnicodeError, ValueError):
+        file_values = {}
+    client_id = os.environ.get("GOOGLE_CLIENT_ID") or file_values.get("GOOGLE_CLIENT_ID", "")
+    client_secret = os.environ.get("GOOGLE_CLIENT_SECRET") or file_values.get(
+        "GOOGLE_CLIENT_SECRET", ""
+    )
+    redirect_uri = os.environ.get("GOOGLE_REDIRECT_URI") or file_values.get(
+        "GOOGLE_REDIRECT_URI", "http://localhost:8080"
+    )
+    parsed = urllib.parse.urlparse(redirect_uri)
+    if (
+        parsed.scheme != "http"
+        or parsed.hostname not in {"localhost", "127.0.0.1", "::1"}
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError("GOOGLE_REDIRECT_URI must be an HTTP loopback URL without credentials or query data.")
 
     return {
         "client_id": client_id or "",
@@ -423,8 +402,8 @@ def exchange_code_for_tokens(code: str, code_verifier: str) -> tuple[TokenSet, U
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
             token_res = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.URLError as e:
-        raise AuthError(f"Failed to exchange authorization code: {e}") from e
+    except urllib.error.URLError as error:
+        raise AuthError("Failed to exchange the authorization code with Google.") from error
 
     access_token = token_res.get("access_token")
     if not access_token:
@@ -459,7 +438,7 @@ def _extract_user_profile(id_token: str | None, access_token: str) -> UserProfil
         with urllib.request.urlopen(req, timeout=15) as resp:
             info = json.loads(resp.read().decode("utf-8"))
     except (urllib.error.URLError, json.JSONDecodeError, OSError, ValueError) as error:
-        raise AuthError(f"Could not verify the Google user profile: {error}") from error
+        raise AuthError("Could not verify the Google user profile.") from error
 
     email = info.get("email")
     name = info.get("name")

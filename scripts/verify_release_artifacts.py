@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import email.parser
+import stat
 import sys
 import tarfile
 import zipfile
@@ -56,12 +57,40 @@ def _validate_names(archive: Path, names: list[str]) -> None:
     violations: list[str] = []
     for name in names:
         path = PurePosixPath(name.replace("\\", "/"))
+        if path.is_absolute() or ".." in path.parts:
+            violations.append(name)
+            continue
         lowered_parts = {part.lower() for part in path.parts}
         if lowered_parts & FORBIDDEN_PARTS or path.suffix.lower() in FORBIDDEN_SUFFIXES:
             violations.append(name)
     if violations:
         joined = "\n  ".join(sorted(violations))
         raise ValueError(f"{archive.name} contains forbidden release files:\n  {joined}")
+
+
+def _validate_zip_members(archive_path: Path, archive: zipfile.ZipFile) -> None:
+    _validate_names(archive_path, archive.namelist())
+    links = [
+        info.filename
+        for info in archive.infolist()
+        if stat.S_ISLNK((info.external_attr >> 16) & 0o177777)
+    ]
+    if links:
+        raise ValueError(f"{archive_path.name} contains symbolic links: {sorted(links)}")
+
+
+def _validate_tar_members(archive_path: Path, archive: tarfile.TarFile) -> None:
+    members = archive.getmembers()
+    _validate_names(archive_path, [member.name for member in members])
+    unsafe = [
+        member.name
+        for member in members
+        if member.issym() or member.islnk() or member.isdev() or member.isfifo()
+    ]
+    if unsafe:
+        raise ValueError(
+            f"{archive_path.name} contains links or special files: {sorted(unsafe)}"
+        )
 
 
 def _metadata(wheel: Path):
@@ -128,9 +157,9 @@ def verify(directory: Path, expected_version: str | None) -> None:
     wheel = wheels[0]
     sdist = sdists[0]
     with zipfile.ZipFile(wheel) as archive:
-        _validate_names(wheel, archive.namelist())
+        _validate_zip_members(wheel, archive)
     with tarfile.open(sdist, mode="r:gz") as archive:
-        _validate_names(sdist, archive.getnames())
+        _validate_tar_members(sdist, archive)
 
     version = _metadata_version(wheel)
     _validate_runtime_requirements(wheel)

@@ -180,11 +180,11 @@ async def test_docker_env_file_cleanup(tmp_path: Path):
     )
     
     import tempfile
-    tmp_base = Path(tempfile.gettempdir()) / "pulse_sandbox"
+    tmp_base = Path(tempfile.gettempdir())
     
     await sandbox.execute_command(["invalid_command_that_fails_fast"])
     
-    env_files = list(tmp_base.glob("*.env"))
+    env_files = list(tmp_base.glob("pulse-sandbox-*/container.env"))
     assert len(env_files) == 0
 
 @pytest.mark.anyio

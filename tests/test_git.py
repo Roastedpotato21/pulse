@@ -11,8 +11,8 @@ def test_git_insight_tracks_branch_status_diff_and_commit_suggestion(tmp_path: P
             ("branch", "--show-current"): (0, "feature/pulse\n", ""),
             ("rev-parse", "--short", "HEAD"): (0, "abc123\n", ""),
             ("status", "--porcelain=v1"): (0, " M src/pulse/git.py\n?? tests/test_git.py\n", ""),
-            ("diff", "--numstat"): (0, "10\t2\tsrc/pulse/git.py\n", ""),
-            ("diff", "--cached", "--numstat"): (0, "", ""),
+            ("diff", "--no-ext-diff", "--no-textconv", "--numstat"): (0, "10\t2\tsrc/pulse/git.py\n", ""),
+            ("diff", "--cached", "--no-ext-diff", "--no-textconv", "--numstat"): (0, "", ""),
         }
         return responses[arguments]
 

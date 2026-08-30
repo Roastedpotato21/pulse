@@ -7,6 +7,40 @@ import os
 import subprocess
 from typing import Any
 
+_PORTABLE_ENV_ALLOWLIST = frozenset(
+    {
+        "APPDATA",
+        "COMSPEC",
+        "HOME",
+        "LANG",
+        "LC_ALL",
+        "LOCALAPPDATA",
+        "PATH",
+        "PATHEXT",
+        "SYSTEMROOT",
+        "TEMP",
+        "TMP",
+        "TMPDIR",
+        "USERPROFILE",
+        "WINDIR",
+    }
+)
+
+
+def isolated_subprocess_environment(
+    extra: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Return a minimal cross-platform environment with no host credentials."""
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if key.upper() in _PORTABLE_ENV_ALLOWLIST
+    }
+    environment["PYTHONNOUSERSITE"] = "1"
+    if extra:
+        environment.update(extra)
+    return environment
+
 
 def isolated_process_kwargs() -> dict[str, Any]:
     """Return platform options that isolate child console control events.

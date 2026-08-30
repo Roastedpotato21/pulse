@@ -47,6 +47,12 @@ class RepositoryIndex:
     """Persists metadata under `.agent` and reparses only changed files."""
 
     _IGNORED = {".git", ".agent", ".agents", ".venv", "venv", "__pycache__", ".pytest_cache", "node_modules"}  # noqa: RUF012
+    _IGNORED_NAMES = {".env", "credentials.json"}  # noqa: RUF012
+    _IGNORED_SUFFIXES = {  # noqa: RUF012
+        ".crt", ".db", ".key", ".log", ".p12", ".pem", ".pfx", ".sqlite", ".sqlite3"
+    }
+    _MAX_INDEX_FILE_BYTES = 2_097_152
+    _MAX_SAVED_INDEX_BYTES = 16_777_216
 
     def __init__(self, workspace: Path, index_path: Path | None = None) -> None:
         self.workspace = workspace.resolve()
@@ -96,6 +102,10 @@ class RepositoryIndex:
             relative = path.relative_to(self.workspace)
             if any(part in self._IGNORED for part in relative.parts):
                 continue
+            if path.name.lower() in self._IGNORED_NAMES or path.suffix.lower() in self._IGNORED_SUFFIXES:
+                continue
+            if path.is_symlink():
+                continue
             if path.is_dir():
                 folders.add(relative.as_posix())
             elif path.is_file():
@@ -127,6 +137,9 @@ class RepositoryIndex:
         self._loaded = True
         if not self.index_path.exists():
             return
+        if self.index_path.is_symlink() or self.index_path.stat().st_size > self._MAX_SAVED_INDEX_BYTES:
+            self._files, self._folders = {}, set()
+            return
         try:
             raw = json.loads(self.index_path.read_text(encoding="utf-8"))
             self._folders = set(raw.get("folders", []))
@@ -149,6 +162,8 @@ class RepositoryIndex:
         temporary_path.replace(self.index_path)
 
     def _parse(self, relative: str, path: Path, fingerprint: str) -> IndexedFile:
+        if path.is_symlink() or path.stat().st_size > self._MAX_INDEX_FILE_BYTES:
+            return IndexedFile(relative, fingerprint, terms=sorted(set(self._terms(relative))))
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:

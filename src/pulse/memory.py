@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
+from pulse.sandbox.secrets import SecretScrubber
 from pulse.storage import migrate_database
 
 MEMORY_SCHEMA_VERSION = 1
@@ -31,10 +32,16 @@ class RequestWithMessage(Protocol):
 class LongTermMemory:
     """Small async façade over a workspace-local SQLite memory database."""
 
-    def __init__(self, workspace: Path, database_path: Path | None = None) -> None:
+    def __init__(
+        self,
+        workspace: Path,
+        database_path: Path | None = None,
+        secrets: list[str] | None = None,
+    ) -> None:
         self.workspace = workspace.resolve()
         self.database_path = database_path or self.workspace / ".agent" / "pulse-memory.sqlite3"
         self._lock = asyncio.Lock()
+        self._scrubber = SecretScrubber(secrets)
         migrate_database(self.database_path, MEMORY_SCHEMA_VERSION, self._migrate_schema)
 
     @staticmethod
@@ -103,10 +110,14 @@ class LongTermMemory:
         return context
 
     async def _store(self, category: str, content: str, tags: tuple[str, ...]) -> MemoryEntry:
-        if not content.strip():
+        clean_content = self._scrubber.redact(content).strip()
+        clean_tags = tuple(self._scrubber.redact(tag) for tag in tags)
+        if not clean_content:
             raise ValueError("Memory content is required.")
         async with self._lock:
-            return await asyncio.to_thread(self._store_sync, category, content.strip(), tags)
+            return await asyncio.to_thread(
+                self._store_sync, category, clean_content, clean_tags
+            )
 
     def _connection(self) -> sqlite3.Connection:
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
@@ -123,6 +134,8 @@ class LongTermMemory:
         return self._entry(row)
 
     def _set_preference(self, key: str, value: str) -> None:
+        key = self._scrubber.redact(key)
+        value = self._scrubber.redact(value)
         with self._connection() as connection:
             connection.execute(
                 "INSERT INTO preferences(key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP",

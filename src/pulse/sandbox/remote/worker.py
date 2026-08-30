@@ -17,9 +17,10 @@ from pulse.sandbox.process import ProcessResult
 from pulse.sandbox.remote.models import (
     ExecutionResultModel,
     SubmitExecutionRequest,
+    validate_execution_id,
 )
 from pulse.sandbox.resources import ResourcePolicy
-from pulse.sandbox.secrets import SecretPolicy
+from pulse.sandbox.secrets import SecretPolicy, SecretScrubber
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +71,17 @@ class RemoteWorker:
             if req.secret_policy_dict
             else None
         )
+        secret_values = list((req.env or {}).values())
+        if sec_policy:
+            secret_values.extend(sec_policy.explicit_env.values())
+        scrubber = SecretScrubber(secret_values)
+
+        async def safe_output_callback(stream: str, data: bytes) -> None:
+            if output_callback is None:
+                return
+            text = data.decode("utf-8", errors="replace")
+            redacted = scrubber.redact(text).encode("utf-8", errors="replace")
+            await output_callback(stream, redacted)
 
         # Resolve paths for the execution
         tenant_workspace = self.workspace_base_path / tenant_id / req.execution_id
@@ -97,7 +109,7 @@ class RemoteWorker:
                 network_policy=net_policy,
                 secret_policy=sec_policy,
                 execution_id=req.execution_id,
-                output_callback=output_callback,
+                output_callback=safe_output_callback if output_callback else None,
             )
 
             # Store the overlay path for retrieval (R6)
@@ -106,24 +118,24 @@ class RemoteWorker:
 
             return ExecutionResultModel(
                 execution_id=req.execution_id,
-                command=result.command,
+                command=scrubber.redact(result.command),
                 exit_code=result.exit_code,
-                stdout=result.stdout,
-                stderr=result.stderr,
+                stdout=scrubber.redact(result.stdout),
+                stderr=scrubber.redact(result.stderr),
                 duration_ms=result.duration_ms,
                 timed_out=result.timed_out,
                 truncated=result.truncated,
                 termination_reason=result.termination_reason,
             )
 
-        except (OSError, RuntimeError, asyncio.CancelledError) as e:
-            logger.error(f"Worker execution failed: {e}")
+        except (OSError, RuntimeError, asyncio.CancelledError):
+            logger.error("Worker execution failed with an internal error.")
             return ExecutionResultModel(
                 execution_id=req.execution_id,
-                command=str(req.command),
+                command=scrubber.redact(str(req.command)),
                 exit_code=-1,
                 stdout="",
-                stderr=f"Worker exception: {e}",
+                stderr="Worker execution failed with an internal error.",
                 duration_ms=0.0,
                 termination_reason="worker_crash",
             )
@@ -141,9 +153,14 @@ class RemoteWorker:
             import shutil
 
             shutil.rmtree(overlay, ignore_errors=True)
+            try:
+                overlay.parent.rmdir()
+            except OSError:
+                pass
 
     def cleanup_workspace(self, tenant_id: str, execution_id: str) -> None:
         """Clean up the tenant workspace."""
+        validate_execution_id(execution_id)
         workspace = self.workspace_base_path / tenant_id / execution_id
         if workspace.exists():
             import shutil

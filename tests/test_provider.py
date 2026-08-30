@@ -51,10 +51,12 @@ def test_stream_chat_sends_configured_max_tokens() -> None:
     assert stream.call_args.kwargs["json"]["max_tokens"] == 1234
 
 
-def test_http_error_detail_uses_openrouter_json_message() -> None:
+def test_http_error_detail_does_not_reflect_openrouter_json_message() -> None:
     provider = OpenRouterProvider(ModelConfig(provider="openrouter", name="test/model", temperature=0.1), Path(".env"))
     request = httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions")
     response = httpx.Response(402, json={"error": {"message": "Insufficient credits"}}, request=request)
     error = httpx.HTTPStatusError("payment required", request=request, response=response)
 
-    assert provider._safe_error_detail(error) == "Insufficient credits"
+    detail = provider._safe_error_detail(error)
+    assert "Insufficient credits" not in detail
+    assert "provider rejected" in detail

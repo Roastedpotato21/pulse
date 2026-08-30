@@ -39,8 +39,11 @@ class BaseProvider(ABC, LLMProvider):
         )
         env = load_env_file(env_path) if env_path.exists() else {}
         self.config = config
+        from pulse.provider_keys import ProviderKeyStore
+
         self.api_key = (
             api_key
+            or ProviderKeyStore(env_path.parent).get(config.provider)
             or os.environ.get(self.api_key_env_var)
             or env.get(self.api_key_env_var)
         )
@@ -56,7 +59,7 @@ class BaseProvider(ABC, LLMProvider):
     ) -> AsyncGenerator[StreamChunk, None]:
         if not self.is_configured:
             raise RuntimeError(
-                f"{self.api_key_env_var} is not configured. Run 'pulse model' or check your .env file."
+                f"{self.api_key_env_var} is not configured. Run 'pulse keys' to add it securely."
             )
 
         payload = self._build_payload(messages, temperature=temperature)
@@ -88,7 +91,7 @@ class BaseProvider(ABC, LLMProvider):
                 ) from error
             except httpx.HTTPError as error:
                 raise RuntimeError(
-                    f"Model request to {self.config.provider} failed: {error}"
+                    f"Model request to {self.config.provider} failed due to a network error."
                 ) from error
             except json.JSONDecodeError as error:
                 raise RuntimeError(
@@ -109,7 +112,7 @@ class BaseProvider(ABC, LLMProvider):
     ) -> list[str]:
         if not self.is_configured:
             raise RuntimeError(
-                f"{self.api_key_env_var} is not configured. Run 'pulse model' or check your .env file."
+                f"{self.api_key_env_var} is not configured. Run 'pulse keys' to add it securely."
             )
 
         payload = self._build_payload(messages, temperature=temperature)
@@ -144,7 +147,7 @@ class BaseProvider(ABC, LLMProvider):
             ) from error
         except httpx.HTTPError as error:
             raise RuntimeError(
-                f"Model request to {self.config.provider} failed: {error}"
+                f"Model request to {self.config.provider} failed due to a network error."
             ) from error
         except json.JSONDecodeError as error:
             raise RuntimeError(
@@ -198,7 +201,7 @@ class BaseProvider(ABC, LLMProvider):
     def _safe_error_detail(self, error: httpx.HTTPError) -> str:
         response = getattr(error, "response", None)
         if response is None:
-            return str(error)
+            return "The provider request failed."
         status = getattr(response, "status_code", 0)
 
         if status == 401:
@@ -208,33 +211,9 @@ class BaseProvider(ABC, LLMProvider):
         if status == 429:
             return f"Rate limit exceeded for {self.config.provider}. Please wait before retrying."
 
-        try:
-            body = response.text.strip()
-        # Intentionally broad to isolate execution boundaries and prevent crashes.
-        except Exception:  # noqa: BLE001
-            return str(error)
-
-        if not body:
-            return str(error)
-
-        try:
-            payload = json.loads(body)
-        except json.JSONDecodeError:
-            return body
-
-        if isinstance(payload, dict):
-            provider_error = payload.get("error")
-            if isinstance(provider_error, dict):
-                msg = provider_error.get("message") or provider_error.get("metadata", {}).get("message")
-                if isinstance(msg, str) and msg.strip():
-                    return msg.strip()
-            elif isinstance(provider_error, str) and provider_error.strip():
-                return provider_error.strip()
-            msg = payload.get("message")
-            if isinstance(msg, str) and msg.strip():
-                return msg.strip()
-
-        return body
+        # Provider-controlled bodies may reflect prompts, request payloads, or
+        # credentials. They must never cross into CLI, RPC, telemetry, or logs.
+        return "The provider rejected the request. Check provider status and configuration."
 
     def _normalize_messages(
         self, messages: list[dict[str, Any] | ChatMessage]

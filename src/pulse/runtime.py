@@ -91,12 +91,17 @@ def build_runtime(workspace: Path, config: AgentConfig | None = None) -> AgentRu
     provider = provider_manager.create_provider(
         resolved_config.model, resolved_workspace / ".env"
     )
+    audit.add_secret(getattr(provider, "api_key", None))
+    telemetry.add_secret(getattr(provider, "api_key", None))
 
     edits = EditWorkflow(sandbox)
     repository = RepositoryIndex(resolved_workspace)
     verification = VerificationEngine(resolved_workspace)
     git = GitIntelligence(resolved_workspace)
-    memory = LongTermMemory(resolved_workspace)
+    memory = LongTermMemory(
+        resolved_workspace,
+        secrets=[provider.api_key] if getattr(provider, "api_key", None) else None,
+    )
     task_manager = TaskManager(resolved_workspace, memory=memory, telemetry=telemetry)
     session_manager = SessionManager(
         resolved_workspace, task_manager=task_manager, telemetry=telemetry

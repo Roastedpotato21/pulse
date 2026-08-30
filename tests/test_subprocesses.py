@@ -50,11 +50,21 @@ async def test_termination_uses_terminate_then_bounded_kill() -> None:
 async def test_verification_launches_an_isolated_child(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
+    class CompletedStream:
+        def __init__(self, chunks: list[bytes]) -> None:
+            self.chunks = chunks
+
+        async def read(self, _limit: int) -> bytes:
+            return self.chunks.pop(0) if self.chunks else b""
+
     class CompletedProcess:
         returncode = 0
+        pid = 1234
+        stdout = CompletedStream([b"passed"])
+        stderr = CompletedStream([])
 
-        async def communicate(self) -> tuple[bytes, bytes]:
-            return b"passed", b""
+        async def wait(self) -> int:
+            return self.returncode
 
     async def fake_create(*_command: str, **kwargs: object) -> CompletedProcess:
         captured.update(kwargs)

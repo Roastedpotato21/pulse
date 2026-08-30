@@ -96,11 +96,14 @@ def test_supported_sqlite_stores_publish_schema_versions(tmp_path: Path) -> None
     assert schema_version(remote_path) == REMOTE_EXECUTION_SCHEMA_VERSION
 
 
-def test_remote_submission_is_idempotent_after_external_completion(tmp_path: Path) -> None:
+def test_remote_submission_replay_after_external_completion_is_rejected(
+    tmp_path: Path,
+) -> None:
     store = RemoteExecutionStore(tmp_path / "remote.sqlite3")
     store.create("execution-1", "tenant-1", "correlation-1")
     store.update("execution-1", "COMPLETED", {"exit_code": 0})
-    store.create("execution-1", "tenant-1", "correlation-replayed")
+    with pytest.raises(sqlite3.IntegrityError):
+        store.create("execution-1", "tenant-1", "correlation-replayed")
 
     record = store.get("execution-1", "tenant-1")
     assert record is not None

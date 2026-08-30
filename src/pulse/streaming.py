@@ -18,6 +18,7 @@ from typing import Any
 from pulse.core.protocols import LLMProvider, StreamChunk
 from pulse.reasoning import ReasoningEngine, ReasoningResult
 from pulse.safety.safety_manager import SafetyManager
+from pulse.sandbox.secrets import SecretScrubber
 from pulse.tool_registry import ToolInvocation, ToolRegistry, ToolResult
 
 logger = logging.getLogger(__name__)
@@ -129,6 +130,11 @@ class StreamingExecutionEngine:
         self.verification_engine = verification_engine
         self.safety_manager = safety_manager or getattr(self.reasoning_engine, "safety_manager", None)
         self.tool_registry = tool_registry or getattr(self.reasoning_engine, "tool_registry", None)
+        self._scrubber = SecretScrubber(
+            [str(provider.api_key)]
+            if provider is not None and getattr(provider, "api_key", None)
+            else None
+        )
 
     async def execute_stream(
         self,
@@ -175,8 +181,8 @@ class StreamingExecutionEngine:
                         metadata={"task_id": task_id, "progress": 25.0},
                     )
                 # Intentionally broad to isolate execution boundaries and prevent crashes.
-                except Exception as err:  # noqa: BLE001
-                    logger.warning(f"TaskManager progress update failed: {err}")
+                except Exception:  # noqa: BLE001
+                    logger.warning("TaskManager progress update failed.")
 
             token.raise_if_cancelled()
 
@@ -303,10 +309,10 @@ class StreamingExecutionEngine:
                         metadata={"success": success},
                     )
                 # Intentionally broad to isolate execution boundaries and prevent crashes.
-                except Exception as err:  # noqa: BLE001
+                except Exception:  # noqa: BLE001
                     yield StreamEvent(
                         event_type=StreamEventType.VERIFICATION_COMPLETE,
-                        content=f"Verification failed with error: {err}",
+                        content="Verification failed with an internal error.",
                         metadata={"success": False},
                     )
 
@@ -320,8 +326,8 @@ class StreamingExecutionEngine:
                         metadata={"task_id": task_id, "progress": 100.0},
                     )
                 # Intentionally broad to isolate execution boundaries and prevent crashes.
-                except Exception as err:  # noqa: BLE001
-                    logger.warning(f"TaskManager completion failed: {err}")
+                except Exception:  # noqa: BLE001
+                    logger.warning("TaskManager completion failed.")
 
             # Telemetry logging
             duration_ms = (datetime.now(UTC) - start_time).total_seconds() * 1000.0
@@ -335,7 +341,9 @@ class StreamingExecutionEngine:
             )
 
         except asyncio.CancelledError as cancel_err:
-            reason_msg = str(cancel_err) or token.reason or "Cancelled"
+            reason_msg = self._scrubber.redact(
+                str(cancel_err) or token.reason or "Cancelled"
+            )
             self._log_telemetry("stream_cancelled", reason=reason_msg, task_id=task_id)
             if task_id and self.task_manager:
                 try:
@@ -350,13 +358,13 @@ class StreamingExecutionEngine:
             )
 
         # Intentionally broad to isolate execution boundaries and prevent crashes.
-        except Exception as err:  # noqa: BLE001
-            logger.error(f"Streaming execution error: {err}")
-            self._log_telemetry("stream_error", error=str(err), task_id=task_id)
+        except Exception:  # noqa: BLE001
+            logger.error("Streaming execution failed with an internal error.")
+            self._log_telemetry("stream_error", error="internal_error", task_id=task_id)
             yield StreamEvent(
                 event_type=StreamEventType.ERROR,
-                content=f"Streaming error: {err}",
-                metadata={"error": str(err)},
+                content="Streaming failed with an internal error.",
+                metadata={"error": "internal_error"},
             )
 
     # ---------------------------------------------------------------------------

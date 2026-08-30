@@ -33,13 +33,14 @@ dedicated virtual environment with `pip`.
 Run these commands from the repository you want Pulse to work on:
 
 ```bash
-pulse model
+pulse login
 pulse doctor --production --target local
 pulse ask "Explain this repository and identify the highest-risk missing test"
 ```
 
-`pulse model` guides provider and model configuration. Provider credentials can
-also be supplied through environment variables such as `OPENAI_API_KEY`,
+After Google login, Pulse guides provider selection, model selection, and hidden
+BYOK entry. New provider keys are stored in the native OS credential vault.
+Credentials can also be supplied through environment variables such as `OPENAI_API_KEY`,
 `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, or `OPENROUTER_API_KEY`. Do not commit a
 populated `.env` file.
 
@@ -83,6 +84,8 @@ pulse-remote   Evaluation-only remote sandbox worker
 ```
 
 Use `pulse --help` for the current command surface and command-specific help.
+`pulse-rpc` and `pulse serve` require a strong `PULSE_RPC_TOKEN` bearer secret
+and must stay bound to loopback.
 
 ### Interactive shell
 
@@ -107,16 +110,20 @@ pulse login
 pulse auth-status
 pulse whoami
 pulse logout
+pulse keys
 pulse keys list
 pulse keys set openai
+pulse keys rotate openai
 pulse keys remove openai
 ```
 
-`pulse keys set` prompts with hidden input; provider keys are never accepted as
-command-line arguments or printed back to the terminal. Keys managed by the CLI
-are stored in the Git-ignored workspace `.env` file with restrictive file
-permissions. Environment variables and external secret managers remain
-supported and take precedence for the current process.
+`pulse keys` opens the status and rotation manager. Set and rotate operations
+prompt with hidden input; provider keys are never accepted as command-line
+arguments or printed back to the terminal. New keys are stored in a
+workspace-scoped entry in the native OS credential vault. Existing `.env` keys
+remain readable for compatibility and are removed for that provider after a
+successful vault-backed set or rotation. Environment variables and external
+secret managers remain supported as fallback sources.
 
 ## Supported boundary
 

@@ -19,10 +19,12 @@ metadata, correlation identifiers, cost/token measurements, and credentials.
 Credentials are read for authentication but must not be written to prompts,
 logs, databases, or source control.
 
-OAuth sessions use the operating-system keyring when available. The local
-recovery file and workspace `.env` are excluded from Git and release artifacts;
-they still contain sensitive credentials and must not be shared or backed up to
-an untrusted location. `pulse keys list` reports configuration state and source
+OAuth sessions are stored in a workspace-scoped operating-system keyring entry.
+If the OS credential vault is unavailable, Pulse fails closed and does not write
+a plaintext session fallback. Provider keys are stored in the same vault-backed
+style when set through `pulse keys`; existing workspace `.env` keys remain
+readable for compatibility but must not be shared, backed up to an untrusted
+location, or committed. `pulse keys list` reports configuration state and source
 without displaying secret values.
 
 ## Where data goes
@@ -46,12 +48,13 @@ prompts, and securely delete backups separately.
 
 ## Security and user control
 
-The supported RPC endpoint is loopback-only. Remote evaluation requires mTLS,
-strong tokens, an isolated workspace root, and container execution. Users can
-inspect, back up, export, or delete local Pulse state because it remains in
-their configured filesystem. Stop Pulse before deleting live SQLite stores and
-coordinate their WAL files. Revoking a provider credential prevents future
-provider access but does not delete data already retained by that provider.
+The supported RPC endpoint is loopback-only and requires a strong
+`PULSE_RPC_TOKEN` bearer secret. Remote evaluation requires mTLS, strong tokens,
+an isolated workspace root, and container execution. Users can inspect, back up,
+export, or delete local Pulse state because it remains in their configured
+filesystem. Stop Pulse before deleting live SQLite stores and coordinate their
+WAL files. Revoking a provider credential prevents future provider access but
+does not delete data already retained by that provider.
 
 ## Privacy requests and changes
 

@@ -20,10 +20,10 @@ def test_json_rpc_dispatches_prompts_and_tool_commands() -> None:
     dispatcher = JsonRpcDispatcher(SimpleNamespace(agent=FakeAgent(), tools=FakeTools()))
 
     ask = asyncio.run(dispatcher.dispatch({"jsonrpc": "2.0", "id": 1, "method": "pulse.ask", "params": {"prompt": "Hello", "context": ["file"]}}))
-    command = asyncio.run(dispatcher.dispatch({"jsonrpc": "2.0", "id": 2, "method": "pulse.command", "params": {"name": "verify"}}))
+    command = asyncio.run(dispatcher.dispatch({"jsonrpc": "2.0", "id": 2, "method": "pulse.command", "params": {"name": "status"}}))
 
     assert ask["result"] == {"content": "Reply to Hello with 1 context item(s)"}
-    assert command["result"] == {"content": "Ran verify", "metadata": {}}
+    assert command["result"] == {"content": "Ran status", "metadata": {}}
     assert len(ask["correlation_id"]) == 32
     assert len(command["correlation_id"]) == 32
     assert ask["pulse_protocol_version"] == RPC_PROTOCOL_VERSION

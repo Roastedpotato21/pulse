@@ -16,6 +16,7 @@ from __future__ import annotations
 import os
 import re
 import threading
+import urllib.parse
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -107,11 +108,16 @@ class SecretScrubber:
         # Fixed: removed nested quantifier from original pattern.
         # Original had \s*[:=\s]\s* which allowed catastrophic backtracking.
         re.compile(
-            r"(?i)(?:api[_-]?key|secret[_-]?key|access[_-]?token|auth[_-]?token|bearer)"
+            r"(?i)(?:api[_-]?key|secret(?:[_-]?key)?|client[_-]?secret|password|"
+            r"private[_-]?key|access[_-]?token|auth[_-]?token|bearer|internal[_-]?prompt)"
             r"\s{0,4}[:=]\s{0,4}"
             r"['\"]?"
-            r"([a-zA-Z0-9_\-\.=]{16,128})"
+            r"([a-zA-Z0-9_%\\\-\.=]{8,512})"
             r"['\"]?"
+        ),
+        re.compile(
+            r"(?i)\b(?:pulse[_-])?(?:audit[_-])?"
+            r"(?:secret|api[_-]?key|internal[_-]?prompt)[a-z0-9_%_\\-]{6,256}\b"
         ),
         # Google API Keys — fixed-length prefix, bounded suffix
         re.compile(r"AIzaSy[A-Za-z0-9_\-]{33}"),
@@ -173,7 +179,7 @@ class SecretScrubber:
 
         if error_container:
             # Unexpected error — return text with error marker
-            return text + f"\n[SCRUB_ERROR: {error_container[0]}]"
+            return "[REDACTION_FAILED]"
 
         return result_container[0] if result_container else text
 
@@ -195,9 +201,29 @@ class SecretScrubber:
         """Internal redaction without timeout guard."""
         scrubbed = text
 
-        # 1. Redact exact registered secret values (longest first to avoid partial matches)
+        # Redact exact registered values and common serialized forms. URLs and
+        # JSON strings otherwise provide trivial redaction bypasses.
         for secret in sorted(self._exact_secrets, key=len, reverse=True):
-            scrubbed = scrubbed.replace(secret, self.REDACTED_LABEL)
+            variants = {
+                secret,
+                urllib.parse.quote(secret, safe=""),
+                urllib.parse.quote_plus(secret, safe=""),
+                "".join(
+                    character
+                    if character.isalnum()
+                    else f"%{ord(character):02X}"
+                    for character in secret
+                ),
+                secret.replace("\\", "\\\\").replace("\n", "\\n").replace("\r", "\\r"),
+            }
+            for variant in sorted(variants, key=len, reverse=True):
+                if variant:
+                    scrubbed = re.sub(
+                        re.escape(variant),
+                        self.REDACTED_LABEL,
+                        scrubbed,
+                        flags=re.IGNORECASE,
+                    )
 
         # 2. Redact regex pattern matches
         for pattern in self.BUILTIN_PATTERNS:

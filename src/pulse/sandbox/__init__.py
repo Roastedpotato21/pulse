@@ -1,70 +1,57 @@
-"""Industry-Grade Secure Sandbox Subsystem for Pulse.
+"""Secure sandbox subsystem public exports.
 
-Provides workspace isolation, rootless container execution, fine-grained
-policy permissions, secret protection, process management, and structured
-audit logging.
+The package keeps these exports lazy so importing a narrow helper such as
+``pulse.sandbox.secrets`` does not initialize the full sandbox stack.
 """
 
-from pulse.sandbox.api import Sandbox, SandboxSession
-from pulse.sandbox.audit import StructuredAuditEntry, StructuredAuditLogger
-from pulse.sandbox.backend import ContainerBackend, DockerBackend, HostBackend
-from pulse.sandbox.errors import (
-    SandboxConcurrentModificationError,
-    SandboxResourceError,
-    SandboxSecurityError,
-    SandboxUnavailableError,
-)
-from pulse.sandbox.filesystem import CoWFilesystem, CoWTransaction
-from pulse.sandbox.git_safe import SafeGit
-from pulse.sandbox.path_validator import PathValidationError, PathValidator
-from pulse.sandbox.policy import ActionType, PolicyDecision, PolicyRule, SandboxPolicy
-from pulse.sandbox.process import ProcessManager, ProcessResult
-from pulse.sandbox.project import ProjectSandbox
-from pulse.sandbox.python_safe import SafePython
-from pulse.sandbox.resources import (
-    ExecutionMetrics,
-    ResourceController,
-    ResourceLimiter,
-    ResourceLimitExceeded,
-    ResourceLimits,
-    ResourceMonitor,
-    ResourcePolicy,
-    TimeoutExceeded,
-)
-from pulse.sandbox.secrets import SecretScrubber
+from __future__ import annotations
 
-__all__ = [
-    "ActionType",
-    "CoWFilesystem",
-    "CoWTransaction",
-    "ContainerBackend",
-    "DockerBackend",
-    "ExecutionMetrics",
-    "HostBackend",
-    "PathValidationError",
-    "PathValidator",
-    "PolicyDecision",
-    "PolicyRule",
-    "ProcessManager",
-    "ProcessResult",
-    "ProjectSandbox",
-    "ResourceController",
-    "ResourceLimitExceeded",
-    "ResourceLimiter",
-    "ResourceLimits",
-    "ResourceMonitor",
-    "ResourcePolicy",
-    "SafeGit",
-    "SafePython",
-    "Sandbox",
-    "SandboxConcurrentModificationError",
-    "SandboxPolicy",
-    "SandboxResourceError",
-    "SandboxSecurityError",
-    "SandboxSession",
-    "SandboxUnavailableError",
-    "SecretScrubber",
-    "StructuredAuditEntry",
-    "StructuredAuditLogger",
-    "TimeoutExceeded",
-]
+from importlib import import_module
+from typing import Any
+
+_EXPORTS = {
+    "ActionType": "pulse.sandbox.policy",
+    "CoWFilesystem": "pulse.sandbox.filesystem",
+    "CoWTransaction": "pulse.sandbox.filesystem",
+    "ContainerBackend": "pulse.sandbox.backend",
+    "DockerBackend": "pulse.sandbox.backend",
+    "ExecutionMetrics": "pulse.sandbox.resources",
+    "HostBackend": "pulse.sandbox.backend",
+    "PathValidationError": "pulse.sandbox.path_validator",
+    "PathValidator": "pulse.sandbox.path_validator",
+    "PolicyDecision": "pulse.sandbox.policy",
+    "PolicyRule": "pulse.sandbox.policy",
+    "ProcessManager": "pulse.sandbox.process",
+    "ProcessResult": "pulse.sandbox.process",
+    "ProjectSandbox": "pulse.sandbox.project",
+    "ResourceController": "pulse.sandbox.resources",
+    "ResourceLimitExceeded": "pulse.sandbox.resources",
+    "ResourceLimiter": "pulse.sandbox.resources",
+    "ResourceLimits": "pulse.sandbox.resources",
+    "ResourceMonitor": "pulse.sandbox.resources",
+    "ResourcePolicy": "pulse.sandbox.resources",
+    "SafeGit": "pulse.sandbox.git_safe",
+    "SafePython": "pulse.sandbox.python_safe",
+    "Sandbox": "pulse.sandbox.api",
+    "SandboxConcurrentModificationError": "pulse.sandbox.errors",
+    "SandboxPolicy": "pulse.sandbox.policy",
+    "SandboxResourceError": "pulse.sandbox.errors",
+    "SandboxSecurityError": "pulse.sandbox.errors",
+    "SandboxSession": "pulse.sandbox.api",
+    "SandboxUnavailableError": "pulse.sandbox.errors",
+    "SecretScrubber": "pulse.sandbox.secrets",
+    "StructuredAuditEntry": "pulse.sandbox.audit",
+    "StructuredAuditLogger": "pulse.sandbox.audit",
+    "TimeoutExceeded": "pulse.sandbox.resources",
+}
+
+__all__ = tuple(sorted(_EXPORTS))
+
+
+def __getattr__(name: str) -> Any:
+    if name not in _EXPORTS:
+        raise AttributeError(name)
+    module = import_module(_EXPORTS[name])
+    value = getattr(module, name)
+    globals()[name] = value
+    return value

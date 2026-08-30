@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from pulse.subprocesses import isolated_process_kwargs, terminate_process
+from pulse.subprocesses import (
+    isolated_process_kwargs,
+    isolated_subprocess_environment,
+    terminate_process,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,8 +68,13 @@ class GitIntelligence:
         status = await self.status()
         if not status.is_repository:
             return DiffAnalysis(0, 0, 0)
-        _, unstaged, _ = await self._runner(("diff", "--numstat"), self.workspace)
-        _, staged, _ = await self._runner(("diff", "--cached", "--numstat"), self.workspace)
+        _, unstaged, _ = await self._runner(
+            ("diff", "--no-ext-diff", "--no-textconv", "--numstat"), self.workspace
+        )
+        _, staged, _ = await self._runner(
+            ("diff", "--cached", "--no-ext-diff", "--no-textconv", "--numstat"),
+            self.workspace,
+        )
         additions = deletions = 0
         files = {change.path for change in status.changes}
         for line in f"{unstaged}\n{staged}".splitlines():
@@ -84,8 +94,13 @@ class GitIntelligence:
             return GitInsight(status, DiffAnalysis(0, 0, 0), None)
         # Reuse the status we already collected while keeping diff collection
         # independent and safe for callers that only need one of the operations.
-        _, unstaged, _ = await self._runner(("diff", "--numstat"), self.workspace)
-        _, staged, _ = await self._runner(("diff", "--cached", "--numstat"), self.workspace)
+        _, unstaged, _ = await self._runner(
+            ("diff", "--no-ext-diff", "--no-textconv", "--numstat"), self.workspace
+        )
+        _, staged, _ = await self._runner(
+            ("diff", "--cached", "--no-ext-diff", "--no-textconv", "--numstat"),
+            self.workspace,
+        )
         additions = deletions = 0
         files = {change.path for change in status.changes}
         for line in f"{unstaged}\n{staged}".splitlines():
@@ -128,6 +143,13 @@ class GitIntelligence:
         try:
             process = await asyncio.create_subprocess_exec(
                 "git", *arguments, cwd=workspace, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                env=isolated_subprocess_environment(
+                    {
+                        "GIT_CONFIG_NOSYSTEM": "1",
+                        "GIT_CONFIG_GLOBAL": str(Path(os.devnull)),
+                        "GIT_ATTR_NOSYSTEM": "1",
+                    }
+                ),
                 **isolated_process_kwargs(),
             )
         except OSError as error:

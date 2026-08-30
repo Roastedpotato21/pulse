@@ -5,6 +5,18 @@ pre-1.0 APIs may change with release notes and migration guidance.
 
 ## [Unreleased]
 
+### Added
+
+- Post-login BYOK onboarding now guides provider and model selection before
+  collecting the selected provider key through hidden terminal input.
+- Provider keys are stored in workspace-scoped native OS credential-vault
+  entries, with safe status, rotation, and removal through `pulse keys`.
+
+### Changed
+
+- Successful key set or rotation migrates that provider away from a legacy
+  plaintext workspace `.env` entry without ever displaying the secret.
+
 ## [0.1.0] - 2026-08-29
 
 ### Added

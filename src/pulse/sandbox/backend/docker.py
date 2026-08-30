@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import shutil
 import stat
 import tempfile
@@ -183,7 +184,7 @@ class DockerBackend:
         """
         # Open with restrictive permissions on POSIX; on Windows os.open
         # ignores the mode but the file is user-owned by default.
-        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
         fd = os.open(str(path), flags, stat.S_IRUSR | stat.S_IWUSR)
         try:
             lines = [f"{k}={v}\n" for k, v in env.items()]
@@ -350,15 +351,17 @@ class DockerBackend:
             )
 
         engine = self._engine or "docker"
-        # We need a temporary place for the cidfile and the extracted overlay
-        tmp_base = Path(tempfile.gettempdir()) / "pulse_sandbox"
-        tmp_base.mkdir(parents=True, exist_ok=True)
-        
+        # A private randomized directory prevents symlink/pre-creation attacks
+        # against predictable cid, environment, and wrapper paths.
+        operation_dir = Path(tempfile.mkdtemp(prefix="pulse-sandbox-"))
         tx_id = execution_id or str(uuid.uuid4())
-        cidfile = tmp_base / f"{tx_id}.cid"
-        overlay_extract_dir = tmp_base / f"{tx_id}_overlay"
-        env_file_path = tmp_base / f"{tx_id}.env"
-        export_wrapper_path = tmp_base / f"{tx_id}_export.sh"
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", tx_id):
+            shutil.rmtree(operation_dir, ignore_errors=True)
+            raise ValueError("execution_id must be a safe 1-128 character identifier")
+        cidfile = operation_dir / "container.cid"
+        overlay_extract_dir = operation_dir / "overlay"
+        env_file_path = operation_dir / "container.env"
+        export_wrapper_path = operation_dir / "export.sh"
         overlay_extract_dir.mkdir(parents=True, exist_ok=True)
         try:
             overlay_extract_dir.chmod(0o777)
@@ -448,7 +451,7 @@ class DockerBackend:
                     pass
             export_wrapper_path.unlink(missing_ok=True)
             if not completed:
-                shutil.rmtree(overlay_extract_dir, ignore_errors=True)
+                shutil.rmtree(operation_dir, ignore_errors=True)
 
     @staticmethod
     def _write_export_wrapper(path: Path) -> None:
@@ -467,7 +470,7 @@ class DockerBackend:
             b'{ echo "Pulse export marker failed" >&2; exit 74; }\n'
             b'exit "$status"\n'
         )
-        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o755)
+        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o755)
         try:
             os.write(fd, script)
         finally:

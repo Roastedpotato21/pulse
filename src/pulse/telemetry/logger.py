@@ -10,6 +10,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from pulse.sandbox.secrets import SecretScrubber
+
 _CORRELATION_ID: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "pulse_correlation_id", default=None
 )
@@ -57,6 +59,20 @@ class TelemetryLogger:
 
     def __init__(self, log_path: Path | None = None) -> None:
         self.log_path = log_path
+        self._scrubber = SecretScrubber()
+
+    def add_secret(self, secret: str | None) -> None:
+        if secret:
+            self._scrubber.add_secret(secret)
+
+    def _sanitize(self, value: Any) -> Any:
+        if isinstance(value, str):
+            return self._scrubber.redact(value)
+        if isinstance(value, dict):
+            return {str(key): self._sanitize(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [self._sanitize(item) for item in value]
+        return value
 
     def log_event(
         self,
@@ -71,7 +87,7 @@ class TelemetryLogger:
             event_type=event_type,
             step=step,
             duration_ms=duration_ms,
-            metadata=metadata,
+            metadata=self._sanitize(metadata),
         )
 
         if self.log_path:

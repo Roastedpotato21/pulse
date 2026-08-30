@@ -63,7 +63,7 @@ class ProjectAgent:
             print_warning("Please pass a question.")
             return
 
-        self.audit.record("question", ".", f"Asked: {question}")
+        self.audit.record("question", ".", "Question received.")
         use_project_context = self._needs_project_context(question)
         project_files = self.sandbox.list_files() if use_project_context else []
         relevant_files: list[str] = []
@@ -80,7 +80,9 @@ class ProjectAgent:
         if not self.provider.is_configured:
             self._print_local_answer(question, project_files, context)
             api_key_env_var = getattr(self.provider, "api_key_env_var", "the provider API key")
-            print_warning(f"\nModel call skipped: set {api_key_env_var} in .env to enable model-backed answers.")
+            print_warning(
+                f"\nModel call skipped: run `pulse keys` to configure {api_key_env_var} securely."
+            )
             return
 
         self.audit.record("model-call", ".", f"Using {self.provider.config.provider}:{self.provider.config.name}.")
@@ -109,7 +111,7 @@ class ProjectAgent:
 
     async def respond_remote(self, prompt: str, context: list[str]) -> str:
         """Serve an IDE/client prompt without importing any transport concerns."""
-        self.audit.record("remote-question", ".", f"Asked: {prompt}")
+        self.audit.record("remote-question", ".", "Remote question received.")
 
         # Prepend managed context (ranked, token-budgeted) from ContextManager
         # before caller-supplied context so the model sees the best signals first.
@@ -238,7 +240,9 @@ class ProjectAgent:
 
         read_files = ", ".join(item.file for item in context)
         api_key_env_var = getattr(self.provider, "api_key_env_var", "the provider API key")
-        print_info(f"I read {read_files}. Add {api_key_env_var} to .env for model-backed answers.")
+        print_info(
+            f"I read {read_files}. Run `pulse keys` to configure {api_key_env_var} securely."
+        )
 
     def _provider_recovery_hint(self, error: RuntimeError) -> str:
         provider_name = self.provider.config.provider
@@ -252,7 +256,7 @@ class ProjectAgent:
                 return "OpenRouter rejected the API key or model access. Check OPENROUTER_API_KEY and the selected model."
             return (
                 "OpenRouter returned an error. Check your OpenRouter credits/billing and API key, "
-                "or switch AGENT_PROVIDER/AGENT_MODEL in .env."
+                "or switch providers with `pulse model`."
             )
         return f"Check the {provider_name} API key, model name, and account status, then try again."
 

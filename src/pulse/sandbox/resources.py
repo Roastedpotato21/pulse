@@ -136,7 +136,9 @@ class ResourceController:
         self.monitor = monitor or ResourceMonitor()
 
     def sanitize_env(self, env: dict[str, str] | None = None) -> dict[str, str]:
-        merged = {**os.environ, **(env or {})}
+        # An explicit environment is authoritative. Merging it with os.environ
+        # silently reintroduces host credentials into supposedly isolated jobs.
+        merged = dict(os.environ if env is None else env)
         for variable in DANGEROUS_ENV_VARS:
             merged.pop(variable, None)
         return merged

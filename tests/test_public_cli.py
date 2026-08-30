@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import warnings
 from pathlib import Path
 
 import pytest
@@ -47,7 +48,7 @@ def test_version_subcommand_matches_version_flag() -> None:
 
 
 def test_provider_key_rotation_never_returns_or_duplicates_secret(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, memory_provider_keyring
 ) -> None:
     secret = "synthetic-provider-key-value"
     env_file = tmp_path / ".env"
@@ -57,11 +58,12 @@ def test_provider_key_rotation_never_returns_or_duplicates_secret(
 
     assert store.set("openai", secret) == "OPENAI_API_KEY"
     content = env_file.read_text(encoding="utf-8")
-    assert content.count("OPENAI_API_KEY=") == 1
+    assert "OPENAI_API_KEY=" not in content
     assert "KEEP_ME=yes" in content
-    assert secret in content
+    assert secret not in content
+    assert secret in memory_provider_keyring.credentials.values()
     status = next(item for item in store.statuses() if item.provider == "openai")
-    assert status.configured and status.source == "workspace .env"
+    assert status.configured and status.source == "OS credential vault"
     assert secret not in repr(status)
 
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
@@ -79,10 +81,57 @@ def test_provider_key_rejects_unsafe_values(tmp_path: Path) -> None:
         store.set("unknown", "secret")
 
 
+def test_provider_key_store_fails_closed_and_preserves_legacy_value(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from pulse import provider_keys
+
+    class FailingKeyring:
+        @staticmethod
+        def get_password(_service: str, _account: str) -> None:
+            return None
+
+        @staticmethod
+        def set_password(_service: str, _account: str, _value: str) -> None:
+            raise RuntimeError("vault unavailable")
+
+    env_file = tmp_path / ".env"
+    env_file.write_text("OPENAI_API_KEY=legacy-value\n", encoding="utf-8")
+    monkeypatch.setattr(provider_keys, "keyring", FailingKeyring())
+
+    with pytest.raises(ProviderKeyError, match="credential vault rejected"):
+        ProviderKeyStore(tmp_path).set("openai", "replacement-value")
+
+    assert env_file.read_text(encoding="utf-8") == "OPENAI_API_KEY=legacy-value\n"
+
+
+def test_provider_key_migration_rolls_back_vault_if_plaintext_cleanup_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    memory_provider_keyring,
+) -> None:
+    store = ProviderKeyStore(tmp_path)
+    store.set("openai", "previous-vault-value")
+    env_file = tmp_path / ".env"
+    env_file.write_text("OPENAI_API_KEY=legacy-value\n", encoding="utf-8")
+
+    def fail_cleanup(_variable: str, _value: str | None) -> None:
+        raise ProviderKeyError("synthetic cleanup failure")
+
+    monkeypatch.setattr(store, "_rewrite", fail_cleanup)
+
+    with pytest.raises(ProviderKeyError, match="vault update was rolled back"):
+        store.rotate("openai", "replacement-value")
+
+    assert store.get("openai") == "previous-vault-value"
+    assert env_file.read_text(encoding="utf-8") == "OPENAI_API_KEY=legacy-value\n"
+
+
 def test_keys_set_cli_uses_hidden_prompt_and_does_not_echo_secret(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    memory_provider_keyring,
 ) -> None:
     from pulse import cli
 
@@ -94,9 +143,88 @@ def test_keys_set_cli_uses_hidden_prompt_and_does_not_echo_secret(
     cli.main()
 
     output = capsys.readouterr().out
-    assert "Updated OPENAI_API_KEY" in output
+    assert "Stored OPENAI_API_KEY in the OS credential vault" in output
     assert secret not in output
-    assert secret in (tmp_path / ".env").read_text(encoding="utf-8")
+    assert not (tmp_path / ".env").exists()
+    assert secret in memory_provider_keyring.credentials.values()
+
+
+def test_hidden_key_input_fails_closed_when_terminal_would_echo(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from pulse import cli
+
+    secret = "must-not-be-read"
+
+    def insecure_getpass(_prompt: str) -> str:
+        warnings.warn("echo unavailable", cli.getpass.GetPassWarning)
+        return secret
+
+    monkeypatch.setattr(cli.getpass, "getpass", insecure_getpass)
+
+    assert cli._read_hidden_provider_key("openai") is None
+    assert secret not in capsys.readouterr().out
+
+
+def test_successful_login_onboards_provider_model_and_hidden_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    memory_provider_keyring,
+) -> None:
+    from pulse import cli
+    from pulse.auth import UserProfile
+
+    secret = "synthetic-onboarding-key"
+    answers = iter(["3", "2"])
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "is_authenticated", lambda: False)
+    monkeypatch.setattr(
+        cli,
+        "login",
+        lambda: UserProfile(email="user@example.com", name="User", sub="subject"),
+    )
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+    monkeypatch.setattr(cli.getpass, "getpass", lambda _prompt: secret)
+    monkeypatch.setattr(sys, "argv", ["pulse", "login"])
+
+    cli.main()
+
+    selection = (tmp_path / ".agent" / "provider.json").read_text(encoding="utf-8")
+    output = capsys.readouterr().out
+    assert '"provider": "openai"' in selection
+    assert '"model": "gpt-4o-mini"' in selection
+    assert "BYOK setup complete" in output
+    assert secret not in output
+    assert secret in memory_provider_keyring.credentials.values()
+
+
+def test_keys_without_subcommand_opens_manager_and_rotates_without_disclosure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    memory_provider_keyring,
+) -> None:
+    from pulse import cli
+
+    old_secret = "synthetic-old-key"
+    new_secret = "synthetic-rotated-key"
+    ProviderKeyStore(tmp_path).set("openai", old_secret)
+    answers = iter(["openai", "rotate", ""])
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+    monkeypatch.setattr(cli.getpass, "getpass", lambda _prompt: new_secret)
+    monkeypatch.setattr(sys, "argv", ["pulse", "keys"])
+
+    cli.main()
+
+    output = capsys.readouterr().out
+    assert "Rotated OPENAI_API_KEY in the OS credential vault" in output
+    assert old_secret not in output
+    assert new_secret not in output
+    assert old_secret not in memory_provider_keyring.credentials.values()
+    assert new_secret in memory_provider_keyring.credentials.values()
 
 
 def test_login_is_routed_without_building_runtime(monkeypatch: pytest.MonkeyPatch) -> None:

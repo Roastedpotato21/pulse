@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 import uuid
 from collections.abc import Iterator
@@ -11,7 +12,7 @@ from difflib import unified_diff
 from pathlib import Path
 from typing import Self
 
-from pulse.subprocesses import isolated_process_kwargs
+from pulse.subprocesses import isolated_process_kwargs, isolated_subprocess_environment
 from pulse.telemetry import get_correlation_id
 
 
@@ -90,6 +91,10 @@ class MutationTracker:
         "__pycache__",
         ".pytest_cache",
     }
+    _IGNORED_NAMES = {".env", "credentials.json"}  # noqa: RUF012
+    _IGNORED_SUFFIXES = {  # noqa: RUF012
+        ".crt", ".db", ".key", ".log", ".p12", ".pem", ".pfx", ".sqlite", ".sqlite3"
+    }
 
     def __init__(self, workspace: Path, log_path: Path | None = None) -> None:
         self.workspace = workspace.resolve()
@@ -109,6 +114,7 @@ class MutationTracker:
                 capture_output=True,
                 timeout=timeout,
                 check=False,
+                env=isolated_subprocess_environment(),
                 **isolated_process_kwargs(),
             )
 
@@ -155,7 +161,13 @@ class MutationTracker:
         snapshots: dict[str, FileSnapshot] = {}
         for path in self.workspace.rglob("*"):
             relative = path.relative_to(self.workspace)
-            if any(part in self._IGNORED_PARTS for part in relative.parts) or not path.is_file():
+            if (
+                any(part in self._IGNORED_PARTS for part in relative.parts)
+                or path.name.lower() in self._IGNORED_NAMES
+                or path.suffix.lower() in self._IGNORED_SUFFIXES
+                or path.is_symlink()
+                or not path.is_file()
+            ):
                 continue
             content = path.read_bytes()
             display_path = relative.as_posix()
@@ -243,6 +255,13 @@ class MutationTracker:
             text=True,
             capture_output=True,
             check=False,
+            env=isolated_subprocess_environment(
+                {
+                    "GIT_CONFIG_NOSYSTEM": "1",
+                    "GIT_CONFIG_GLOBAL": str(Path(os.devnull)),
+                    "GIT_ATTR_NOSYSTEM": "1",
+                }
+            ),
             **isolated_process_kwargs(),
         )
         return result.stdout.strip() if result.returncode == 0 else None

@@ -7,6 +7,7 @@ import pytest
 
 from pulse.config import ModelConfig
 from pulse.provider import ProviderFactory
+from pulse.provider_keys import ProviderKeyStore
 from pulse.providers import (
     AnthropicProvider,
     DeepSeekProvider,
@@ -98,6 +99,22 @@ def test_create_provider_instances(temp_workspace: Path) -> None:
     assert isinstance(provider, AnthropicProvider)
     assert provider.config.name == "claude-3-5-sonnet-20241022"
     assert provider.api_key == "test-key"
+
+
+def test_create_provider_reads_key_from_native_vault(
+    temp_workspace: Path, memory_provider_keyring
+) -> None:
+    secret = "synthetic-vault-provider-key"
+    ProviderKeyStore(temp_workspace).set("anthropic", secret)
+    config = ModelConfig(
+        provider="anthropic",
+        name="claude-3-5-sonnet-20241022",
+        temperature=0.2,
+    )
+
+    provider = ProviderManager(temp_workspace).create_provider(config)
+
+    assert provider.api_key == secret
 
 
 def test_unsupported_provider_raises(temp_workspace: Path) -> None:

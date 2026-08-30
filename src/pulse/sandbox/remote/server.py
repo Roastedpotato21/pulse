@@ -7,24 +7,32 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
+import binascii
 import datetime
 import hmac
 import http
+import io
 import json
 import logging
 import os
+import re
+import shutil
 import sqlite3
+import tarfile
 from contextlib import suppress
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import websockets
 
 from pulse import __version__
 from pulse.production import is_secure_remote_token
+from pulse.sandbox.errors import SandboxSecurityError
 from pulse.sandbox.remote.models import (
     SubmitExecutionRequest,
     SubmitExecutionResponse,
+    validate_execution_id,
 )
 from pulse.sandbox.remote.worker import RemoteWorker
 from pulse.storage import migrate_database
@@ -32,6 +40,57 @@ from pulse.storage import migrate_database
 REMOTE_EXECUTION_SCHEMA_VERSION = 2
 
 logger = logging.getLogger(__name__)
+
+MAX_ARTIFACT_COMPRESSED_BYTES = 32 * 1024 * 1024
+MAX_ARTIFACT_UNPACKED_BYTES = 512 * 1024 * 1024
+MAX_ARTIFACT_MEMBERS = 10_000
+_SAFE_REQUEST_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+
+def _request_id(value: object) -> str | None:
+    return value if isinstance(value, str) and _SAFE_REQUEST_ID.fullmatch(value) else None
+
+
+def _extract_remote_artifact(data: bytes, workspace: Path) -> None:
+    """Extract a bounded regular-file archive into a new workspace."""
+    if len(data) > MAX_ARTIFACT_COMPRESSED_BYTES:
+        raise SandboxSecurityError("Remote artifact exceeds the compressed size limit")
+    if workspace.exists():
+        raise SandboxSecurityError("Remote artifact workspace already exists")
+    workspace.mkdir(parents=True, exist_ok=False)
+    try:
+        with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as archive:
+            members = archive.getmembers()
+            if len(members) > MAX_ARTIFACT_MEMBERS:
+                raise SandboxSecurityError("Remote artifact contains too many members")
+            total_size = 0
+            root = workspace.resolve()
+            for member in members:
+                normalized = PurePosixPath(member.name.replace("\\", "/"))
+                if (
+                    normalized.is_absolute()
+                    or ".." in normalized.parts
+                    or member.issym()
+                    or member.islnk()
+                    or not (member.isfile() or member.isdir())
+                ):
+                    raise SandboxSecurityError("Unsafe remote artifact member")
+                target = (root / Path(*normalized.parts)).resolve()
+                try:
+                    target.relative_to(root)
+                except ValueError as error:
+                    raise SandboxSecurityError("Remote artifact path traversal detected") from error
+                if member.isfile():
+                    total_size += member.size
+                    if total_size > MAX_ARTIFACT_UNPACKED_BYTES:
+                        raise SandboxSecurityError("Remote artifact exceeds the unpacked size limit")
+            if hasattr(tarfile, "data_filter"):
+                archive.extractall(path=root, filter="data")
+            else:  # pragma: no cover - compatibility for early Python 3.11
+                archive.extractall(path=root)
+    except Exception:
+        shutil.rmtree(workspace, ignore_errors=True)
+        raise
 
 
 def _append_log_entry(path: Path, entry: str) -> None:
@@ -86,7 +145,7 @@ class RemoteExecutionStore:
         with self._connect() as conn:
             conn.execute(
                 "INSERT INTO executions (execution_id, tenant_id, status, correlation_id, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(execution_id) DO NOTHING",
+                "VALUES (?, ?, ?, ?, ?, ?)",
                 (execution_id, tenant_id, "RUNNING", correlation_id, now, now),
             )
 
@@ -121,6 +180,12 @@ class RemoteExecutionStore:
                 "updated_at": row[3],
                 "correlation_id": row[4],
             }
+
+    def exists(self, execution_id: str) -> bool:
+        with self._connect() as conn:
+            return conn.execute(
+                "SELECT 1 FROM executions WHERE execution_id = ?", (execution_id,)
+            ).fetchone() is not None
 
     def cleanup_old(self, max_age_hours: int = 1) -> list[tuple[str, str]]:
         threshold = (
@@ -394,9 +459,9 @@ class RemoteServer:
                         dead_ws.add(ws)
                 for ws in dead_ws:
                     attached.discard(ws)
-            except (OSError, RuntimeError) as e:
-                logger.error(f"Execution failed: {e}")
-                err_msg = f"Execution failed: {e}"
+            except (OSError, RuntimeError, sqlite3.Error):
+                logger.error("Remote execution failed with an internal error.")
+                err_msg = "Remote execution failed with an internal error."
                 from pulse.sandbox.process import ProcessResult
 
                 fallback_res = ProcessResult(
@@ -437,9 +502,13 @@ class RemoteServer:
                 request_id: str | None = None
                 try:
                     data = json.loads(message)
+                    if not isinstance(data, dict):
+                        raise TypeError("message must be an object")
                     action = data.get("action")
                     payload = data.get("payload", {})
-                    request_id = payload.get("request_id")
+                    if not isinstance(action, str) or not isinstance(payload, dict):
+                        raise TypeError("action and payload have invalid types")
+                    request_id = _request_id(payload.get("request_id"))
 
                     if action == "submit":
                         if (
@@ -463,6 +532,10 @@ class RemoteServer:
                             continue
 
                         req = SubmitExecutionRequest.from_dict(payload)
+                        if req.execution_id in self._active_executions or self.store.exists(
+                            req.execution_id
+                        ):
+                            raise ValueError("execution_id is already in use")
                         # Acknowledge submission
                         ack = SubmitExecutionResponse(
                             execution_id=req.execution_id, status="STARTING"
@@ -482,7 +555,7 @@ class RemoteServer:
                         client_executions.add(req.execution_id)
 
                     elif action == "cancel":
-                        execution_id = payload.get("execution_id")
+                        execution_id = validate_execution_id(payload.get("execution_id"))
                         if execution_id:
                             # Cross-tenant prevention
                             if self._execution_tenants.get(execution_id) != tenant_hash:
@@ -518,49 +591,17 @@ class RemoteServer:
                             )
 
                     elif action == "upload_artifact":
-                        import base64
-                        import io
-                        import tarfile
-
-                        execution_id = payload.get("execution_id")
+                        execution_id = validate_execution_id(payload.get("execution_id"))
                         b64_data = payload.get("data")
-                        if execution_id and b64_data:
+                        if execution_id and isinstance(b64_data, str) and b64_data:
                             try:
-                                data = base64.b64decode(b64_data)
+                                data = base64.b64decode(b64_data, validate=True)
                                 workspace = (
                                     self.worker.workspace_base_path
                                     / tenant_hash
                                     / execution_id
                                 )
-                                workspace.mkdir(parents=True, exist_ok=True)
-                                with tarfile.open(
-                                    fileobj=io.BytesIO(data), mode="r:gz"
-                                ) as tar:
-                                    import os
-
-                                    from pulse.sandbox.errors import (
-                                        SandboxSecurityError,
-                                    )
-
-                                    for member in tar.getmembers():
-                                        if member.issym() or member.islnk():
-                                            raise SandboxSecurityError(
-                                                "Symlinks are not allowed in remote artifacts"
-                                            )
-                                        member_path = os.path.join(
-                                            str(workspace), member.name
-                                        )
-                                        if not os.path.abspath(member_path).startswith(
-                                            os.path.abspath(str(workspace))
-                                        ):
-                                            raise SandboxSecurityError(
-                                                "Path traversal detected in upload_artifact"
-                                            )
-                                    # use data filter if available, else extractall (we checked manually above)
-                                    if hasattr(tarfile, "data_filter"):
-                                        tar.extractall(path=workspace, filter="data")
-                                    else:
-                                        tar.extractall(path=workspace)
+                                _extract_remote_artifact(data, workspace)
                                 await websocket.send(
                                     json.dumps(
                                         {
@@ -572,14 +613,20 @@ class RemoteServer:
                                         }
                                     )
                                 )
-                            except (OSError, ValueError, RuntimeError) as e:
-                                logger.error(f"Failed to extract artifact: {e}")
+                            except (
+                                OSError,
+                                ValueError,
+                                RuntimeError,
+                                tarfile.TarError,
+                                binascii.Error,
+                            ):
+                                logger.error("Remote artifact upload was rejected.")
                                 await websocket.send(
                                     json.dumps(
                                         {
                                             "type": "error",
                                             "payload": {
-                                                "message": f"Upload failed: {e}",
+                                                "message": "Upload failed.",
                                                 "request_id": request_id,
                                             },
                                         }
@@ -587,11 +634,7 @@ class RemoteServer:
                                 )
 
                     elif action == "download_artifact":
-                        import base64
-                        import io
-                        import tarfile
-
-                        execution_id = payload.get("execution_id")
+                        execution_id = validate_execution_id(payload.get("execution_id"))
                         if execution_id:
                             if not self.store.get(execution_id, tenant_hash):
                                 await websocket.send(
@@ -670,8 +713,7 @@ class RemoteServer:
                         )
 
                     elif action == "status":
-                        execution_id = payload.get("execution_id")
-                        request_id = payload.get("request_id")
+                        execution_id = validate_execution_id(payload.get("execution_id"))
                         state = self.store.get(execution_id, tenant_hash)
                         if not state:
                             await websocket.send(
@@ -702,7 +744,7 @@ class RemoteServer:
                             )
 
                     elif action == "attach":
-                        execution_id = payload.get("execution_id")
+                        execution_id = validate_execution_id(payload.get("execution_id"))
                         state = self.store.get(execution_id, tenant_hash)
                         if not state:
                             await websocket.send(
@@ -810,21 +852,28 @@ class RemoteServer:
                                 {
                                     "type": "error",
                                     "payload": {
-                                        "message": f"Unknown action: {action}",
+                                        "message": "Unknown action.",
                                         "request_id": request_id,
                                     },
                                 }
                             )
                         )
 
-                except (KeyError, ValueError, OSError, RuntimeError) as e:
-                    logger.error(f"Error processing message: {e}")
+                except (
+                    KeyError,
+                    ValueError,
+                    OSError,
+                    RuntimeError,
+                    TypeError,
+                    RecursionError,
+                ):
+                    logger.error("Rejected an invalid remote protocol message.")
                     await websocket.send(
                         json.dumps(
                             {
                                 "type": "error",
                                 "payload": {
-                                    "message": str(e),
+                                    "message": "Invalid remote protocol request.",
                                     "request_id": request_id,
                                 },
                             }
@@ -910,20 +959,25 @@ def main() -> None:
                         f"{variable} must reference an existing absolute file "
                         "for a non-loopback worker"
                     )
-    server = RemoteServer(
-        host=args.host,
-        port=args.port,
-        auth_token=token,
-        max_concurrent_executions=args.max_concurrency,
-        workspace_root=args.workspace_root,
-        database_path=args.database,
-        retention_hours=args.retention_hours,
-        production_mode=not args.development,
-    )
     try:
+        server = RemoteServer(
+            host=args.host,
+            port=args.port,
+            auth_token=token,
+            max_concurrent_executions=args.max_concurrency,
+            workspace_root=args.workspace_root,
+            database_path=args.database,
+            retention_hours=args.retention_hours,
+            production_mode=not args.development,
+        )
         asyncio.run(server.start())
     except KeyboardInterrupt:
         logger.info("Server shutting down.")
+    except (OSError, RuntimeError, ValueError):
+        print(
+            "pulse-remote failed to start. Check host, port, token, TLS, and storage settings."
+        )
+        raise SystemExit(1) from None
 
 
 if __name__ == "__main__":
