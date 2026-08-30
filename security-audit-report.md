@@ -122,3 +122,42 @@ No `eval` or `evals` public CLI command was present; release evaluation support 
 ## Final Assessment
 
 All confirmed in-repo vulnerabilities identified during this audit were fixed and covered by targeted regression tests where practical. No dependency CVEs or current controlled-canary leaks were found. The package is locally clean on Windows/Python 3.12.13, but release should remain blocked until the external CI, Docker, platform, and live-provider gates pass on the final commit.
+
+## Final Release Verifier Update
+
+Date: 2026-08-30
+Verifier scope: exact current repository state after independent rerun.
+Base commit SHA: `646b6d2143160737c995252de7919cde9d36682f`
+Working tree status after verifier fixes: dirty.
+
+The verifier pass independently reran the required gates and found two additional release blockers in the working tree after commit `646b6d2`:
+
+- Installed `pulse` with no console/stdin could emit a `prompt_toolkit.output.win32.NoConsoleScreenBufferError` traceback on Windows. Fixed in `src/pulse/cli.py`; regression added in `tests/test_cli_entrypoint.py`.
+- The release canary `PULSE_INTERNAL_TRACE_51AC77` could survive in remote worker final stderr, and the release canary `PULSE_RELEASE_SECRET_7F13C9` could persist in conversation WAL data because the generic scrubber pattern did not cover release/trace canary forms. Fixed in `src/pulse/sandbox/secrets.py`; regression extended in `tests/test_security_audit_regressions.py`.
+
+Because those fixes are not committed or pushed yet, hosted CI has not verified the exact current state. The previous hosted CI run succeeded for commit `646b6d2143160737c995252de7919cde9d36682f`, but that is no longer the complete verifier-fixed tree.
+
+### Final Verifier Gate Table
+
+| Gate | Status | Evidence | Exit code | Blocking action |
+| --- | --- | --- | ---: | --- |
+| Release state | FAIL | `git status --short` was initially clean at `646b6d2143160737c995252de7919cde9d36682f`; verifier fixes now leave `OPERATIONS.md`, `src/pulse/cli.py`, `src/pulse/sandbox/secrets.py`, `tests/test_cli_entrypoint.py`, and `tests/test_security_audit_regressions.py` modified, plus this report update. | 0 | Commit and push verifier fixes, then rerun hosted CI. |
+| Whitespace | PASS | `git diff --check` clean; only LF-to-CRLF advisory warnings. | 0 | None. |
+| Tracked file hygiene | PASS | `git ls-files` scan matched only `.env.example`; no tracked `.env`, venv, logs, caches, databases, generated credentials, or audit venvs. | 0 | None. |
+| `uv sync --locked` | PASS | Initial sandbox run failed on uv cache permission; escalated run resolved 76 packages and checked 68 packages. | 0 | None. |
+| Ruff | PASS | `uv run ruff check src tests scripts` returned “All checks passed!”. | 0 | None. |
+| Mypy | PASS | `uv run mypy` returned “Success: no issues found in 5 source files”. | 0 | None. |
+| Pytest | PASS with classified skips | `uv run pytest -rs`: `437 passed, 17 skipped in 50.84s`; skip reasons were Docker unavailable, Windows-inapplicable `setsid`/`PDEATHSIG`, and unavailable symlink privileges. No failures/errors were reported. | 0 | Local Docker/symlink skips require hosted or suitable-host evidence before release readiness. |
+| Pytest warnings | PASS | No pytest warnings summary appeared in the final run. | 0 | None. |
+| Dependency audit | PASS | `uv run pip-audit --progress-spinner off`: no known vulnerabilities; local `pulse-coding-agent` skipped because not found on PyPI. A pip-audit environment-selection warning was emitted and is non-blocking for this uv-managed interpreter check. | 0 | None. |
+| Build | PASS | `uv build` rebuilt `pulse_coding_agent-0.1.0.tar.gz` and `pulse_coding_agent-0.1.0-py3-none-any.whl`. | 0 | None. |
+| Artifact verifier | PASS | `uv run python scripts/verify_release_artifacts.py dist`: wheel and sdist verified for version 0.1.0. | 0 | None. |
+| Local Docker live gate | FAIL | `docker version`, `docker info`, and both requested `docker run` commands failed because `docker` is not installed/available in this shell. `scripts/run_docker_release_tests.py release-metadata/docker-release.xml` exited with “Docker CLI is required”. | 1 | Run on a host with Docker or rely on hosted Docker-security evidence after current fixes are pushed. |
+| Podman live gate | PENDING | Docs and code claim Podman support; `podman --version` failed because `podman` is not installed/available locally. No complete live Podman gate was found/run. | 1 | Add/run an explicit Podman live release gate or narrow the support claim. |
+| Installed wheel | PASS | Clean temp venv outside repo: `C:\Users\sindh\AppData\Local\Temp\pulse-wheel-verify-e2ae5107fe274114945aae66e4f32101`; wheel installed 35 packages; dynamic command inventory and safe-failure matrix completed without hangs, tracebacks, or canary output after the CLI fix. | 0 | None after committing verifier fix. |
+| CLI command inventory | PASS | Discovered commands: `version`, `ask`, `model`, `keys`, `chat`, `status`, `doctor`, `mutations`, `edit`, `patch`, `rollback`, `index`, `search`, `symbols`, `verify`, `git`, `memory`, `ci`, `tasks`, `task`, `resume`, `cancel`, `sessions`, `session`, `resume-session`, `login`, `logout`, `whoami`, `auth-status`, `serve`; nested `keys` and `chat` commands verified. `eval`/`evals` absent by parser inventory. | 0 | None. |
+| Canary leakage | PASS | Final fake-canary exercise for `PULSE_RELEASE_SECRET_7F13C9` and `PULSE_INTERNAL_TRACE_51AC77` reported no provider/RPC/remote result/remote stream leaks, no file hits, and no wheel/sdist archive hits. | 0 | None after committing verifier scrubber fix. |
+| Protected live-provider smoke | PENDING | `pulse keys list` found only `openrouter` configured from legacy workspace `.env`; no protected/keyring-backed release credential was available, and no real provider prompt was sent. | 0 | Configure protected release credential and run installed-wheel smoke prompt. |
+| Hosted CI for exact state | PENDING | Public API/earlier polling verified CI success for pushed commit `646b6d2143160737c995252de7919cde9d36682f`, including secret-scan, docker-security, dependency-audit, Python Linux/macOS/Windows matrix, VS Code extension, and package. Current verifier-fixed state is uncommitted, so hosted CI does not yet cover it. | n/a | Commit/push verifier fixes and rerun CI. |
+
+Final verifier verdict: BLOCKED for public deployment until the current verifier fixes are committed, pushed, and verified by hosted CI, and until Docker/Podman/live-provider release gates are either run successfully or explicitly removed from the release requirement/support claim.

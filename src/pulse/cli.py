@@ -1066,6 +1066,9 @@ def main(argv: list[str] | None = None) -> None:
     except (EOFError, OSError, RuntimeError, ValueError, json.JSONDecodeError):
         print_error("Pulse could not complete the request. Check configuration and inputs.")
         raise SystemExit(1) from None
+    except Exception:  # noqa: BLE001
+        print_error("Pulse could not complete the request. Check configuration and inputs.")
+        raise SystemExit(1) from None
 
 
 if __name__ == "__main__":

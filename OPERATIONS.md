@@ -28,8 +28,8 @@ table contains at least one release blocker. Automation should use
 
 The loopback JSON-RPC server (`pulse-rpc` or `pulse serve`) requires
 `PULSE_RPC_TOKEN` to be a non-placeholder bearer secret of 32 to 512 characters.
-Start it only on loopback and pass `Authorization: Bearer <token>` from the IDE
-client.
+Start it only on loopback and configure the IDE client to send that bearer token
+in the HTTP authorization header.
 
 For a controlled remote-worker evaluation, configure absolute durable paths,
 a cryptographically random token, and mTLS, then run:

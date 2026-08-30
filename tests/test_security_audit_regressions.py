@@ -37,6 +37,8 @@ from pulse.verification import VerificationEngine
 AUDIT_SECRET = "PULSE_" + "AUDIT_SECRET_" + "7f13c9"
 AUDIT_API_KEY = "PULSE_" + "AUDIT_API_KEY_" + "8d21e4"
 INTERNAL_PROMPT = "PULSE_" + "INTERNAL_PROMPT_" + "51ac77"
+RELEASE_SECRET = "PULSE_" + "RELEASE_SECRET_" + "7F13C9"
+INTERNAL_TRACE = "PULSE_" + "INTERNAL_TRACE_" + "51AC77"
 
 
 def test_redactor_handles_serialized_variants_and_fails_closed(
@@ -51,12 +53,18 @@ def test_redactor_handles_serialized_variants_and_fails_closed(
         + AUDIT_API_KEY
         + " "
         + INTERNAL_PROMPT
+        + " "
+        + RELEASE_SECRET
+        + " "
+        + INTERNAL_TRACE
     )
     redacted = scrubber.redact(serialized)
     assert AUDIT_SECRET.lower() not in redacted.lower()
     assert "%5F" not in redacted
     assert AUDIT_API_KEY not in redacted
     assert INTERNAL_PROMPT not in redacted
+    assert RELEASE_SECRET not in redacted
+    assert INTERNAL_TRACE not in redacted
 
     def explode(_text: str) -> str:
         raise RuntimeError(AUDIT_SECRET)

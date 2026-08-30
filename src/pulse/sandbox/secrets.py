@@ -117,7 +117,8 @@ class SecretScrubber:
         ),
         re.compile(
             r"(?i)\b(?:pulse[_-])?(?:audit[_-])?"
-            r"(?:secret|api[_-]?key|internal[_-]?prompt)[a-z0-9_%_\\-]{6,256}\b"
+            r"(?:release[_-])?"
+            r"(?:secret|api[_-]?key|internal[_-]?(?:prompt|trace))[a-z0-9_%_\\-]{6,256}\b"
         ),
         # Google API Keys — fixed-length prefix, bounded suffix
         re.compile(r"AIzaSy[A-Za-z0-9_\-]{33}"),
