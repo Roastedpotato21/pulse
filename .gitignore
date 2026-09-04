@@ -1,7 +1,6 @@
 # Secrets and machine-specific configuration
 .env
 .env.*
-!.env.example
 *.pem
 *.key
 *.p12

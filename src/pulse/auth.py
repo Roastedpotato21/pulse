@@ -11,9 +11,11 @@ import base64
 import hashlib
 import hmac
 import http.server
+import importlib.resources
 import json
 import logging
 import os
+import re
 import secrets
 import socketserver
 import time
@@ -34,12 +36,24 @@ logger = logging.getLogger(__name__)
 
 KEYRING_SERVICE_NAME = "pulse-cli"
 KEYRING_ACCOUNT_NAME = "current_session"
+PRODUCT_OAUTH_RESOURCE = "_product_oauth.json"
+PRODUCT_CLIENT_ID_ENV = "PULSE_GOOGLE_CLIENT_ID"
+PRODUCT_REDIRECT_URI_ENV = "PULSE_GOOGLE_REDIRECT_URI"
+DEFAULT_REDIRECT_URI = "http://127.0.0.1"
+_GOOGLE_CLIENT_ID = re.compile(
+    r"^[0-9]+-[A-Za-z0-9_-]+\.apps\.googleusercontent\.com$"
+)
+_UNCONFIGURED_CLIENT_IDS = {"", "not-configured", "placeholder", "replace_me"}
 
 
 # --- Exceptions ---
 
 class AuthError(Exception):
     """Base exception for authentication errors."""
+
+
+class AuthConfigurationError(AuthError):
+    """Raised when an installation has no valid product OAuth identity."""
 
 
 class AuthTimeoutError(AuthError):
@@ -264,7 +278,7 @@ class OAuthCallbackHandler(http.server.BaseHTTPRequestHandler):
             self._send_response_page(
                 status=200,
                 title="Authentication Successful",
-                message="✓ Successfully authenticated with Pulse! You can close this window and return to your terminal.",
+                message="Successfully authenticated with Pulse. You can close this window and return to your terminal.",
                 is_success=True,
             )
             return
@@ -329,44 +343,82 @@ class SingleRequestHTTPServer(socketserver.TCPServer):
 
 # --- OAuth Client Helper ---
 
-def get_google_config() -> dict[str, str]:
-    """Retrieve only the OAuth values Pulse recognizes, without mutating the process."""
-    from pulse.config import load_env_file
-
+def _packaged_google_config() -> dict[str, str]:
+    """Load the public OAuth identity embedded in the installed distribution."""
     try:
-        file_values = load_env_file(Path.cwd() / ".env")
-    except (OSError, UnicodeError, ValueError):
-        file_values = {}
-    client_id = os.environ.get("GOOGLE_CLIENT_ID") or file_values.get("GOOGLE_CLIENT_ID", "")
-    client_secret = os.environ.get("GOOGLE_CLIENT_SECRET") or file_values.get(
-        "GOOGLE_CLIENT_SECRET", ""
-    )
-    redirect_uri = os.environ.get("GOOGLE_REDIRECT_URI") or file_values.get(
-        "GOOGLE_REDIRECT_URI", "http://localhost:8080"
-    )
-    parsed = urllib.parse.urlparse(redirect_uri)
+        resource = importlib.resources.files("pulse").joinpath(PRODUCT_OAUTH_RESOURCE)
+        raw = resource.read_text(encoding="utf-8")
+        if len(raw.encode("utf-8")) > 4096:
+            raise AuthConfigurationError("The packaged Google sign-in configuration is invalid.")
+        parsed = json.loads(raw)
+    except AuthConfigurationError:
+        raise
+    except (FileNotFoundError, ModuleNotFoundError, OSError, TypeError, json.JSONDecodeError):
+        return {}
+
+    if not isinstance(parsed, dict):
+        raise AuthConfigurationError("The packaged Google sign-in configuration is invalid.")
+    return {
+        "client_id": str(parsed.get("client_id", "")).strip(),
+        "redirect_uri": str(parsed.get("redirect_uri", DEFAULT_REDIRECT_URI)).strip(),
+    }
+
+
+def _validated_redirect_uri(value: str) -> str:
+    try:
+        parsed = urllib.parse.urlparse(value)
+        port = parsed.port
+    except ValueError as error:
+        raise AuthConfigurationError(
+            "The Google sign-in callback configuration in this installation is invalid."
+        ) from error
     if (
         parsed.scheme != "http"
-        or parsed.hostname not in {"localhost", "127.0.0.1", "::1"}
+        or parsed.hostname != "127.0.0.1"
         or parsed.username is not None
         or parsed.password is not None
         or parsed.query
         or parsed.fragment
+        or (port is not None and not 1 <= port <= 65535)
     ):
-        raise ValueError("GOOGLE_REDIRECT_URI must be an HTTP loopback URL without credentials or query data.")
+        raise AuthConfigurationError(
+            "The Google sign-in callback configuration in this installation is invalid."
+        )
+    return value
+
+
+def get_google_config() -> dict[str, str]:
+    """Resolve the product-owned public OAuth identity without reading workspace files."""
+    packaged = _packaged_google_config()
+    client_id = os.environ.get(PRODUCT_CLIENT_ID_ENV, "").strip() or packaged.get(
+        "client_id", ""
+    )
+    redirect_uri = os.environ.get(PRODUCT_REDIRECT_URI_ENV, "").strip() or packaged.get(
+        "redirect_uri", DEFAULT_REDIRECT_URI
+    )
+
+    if (
+        client_id.lower() in _UNCONFIGURED_CLIENT_IDS
+        or not _GOOGLE_CLIENT_ID.fullmatch(client_id)
+    ):
+        raise AuthConfigurationError(
+            "This Pulse installation does not include a valid Google sign-in client."
+        )
 
     return {
-        "client_id": client_id or "",
-        "client_secret": client_secret or "",
-        "redirect_uri": redirect_uri or "http://localhost:8080",
+        "client_id": client_id,
+        "redirect_uri": _validated_redirect_uri(redirect_uri or DEFAULT_REDIRECT_URI),
     }
 
 
-def build_authorization_url(state: str, code_challenge: str) -> str:
-    config = get_google_config()
+def build_authorization_url(
+    state: str,
+    code_challenge: str,
+    *,
+    config: dict[str, str] | None = None,
+) -> str:
+    config = config or get_google_config()
     client_id = config["client_id"]
-    if not client_id or client_id == "replace_me":
-        raise ValueError("GOOGLE_CLIENT_ID environment variable is not set or contains default 'replace_me'")
 
     params = {
         "client_id": client_id,
@@ -382,12 +434,16 @@ def build_authorization_url(state: str, code_challenge: str) -> str:
     return f"https://accounts.google.com/o/oauth2/v2/auth?{urllib.parse.urlencode(params)}"
 
 
-def exchange_code_for_tokens(code: str, code_verifier: str) -> tuple[TokenSet, UserProfile]:
-    config = get_google_config()
+def exchange_code_for_tokens(
+    code: str,
+    code_verifier: str,
+    *,
+    config: dict[str, str] | None = None,
+) -> tuple[TokenSet, UserProfile]:
+    config = config or get_google_config()
     data = urllib.parse.urlencode({
         "code": code,
         "client_id": config["client_id"],
-        "client_secret": config["client_secret"],
         "redirect_uri": config["redirect_uri"],
         "grant_type": "authorization_code",
         "code_verifier": code_verifier,
@@ -404,14 +460,28 @@ def exchange_code_for_tokens(code: str, code_verifier: str) -> tuple[TokenSet, U
             token_res = json.loads(resp.read().decode("utf-8"))
     except urllib.error.URLError as error:
         raise AuthError("Failed to exchange the authorization code with Google.") from error
+    except (json.JSONDecodeError, OSError, UnicodeError) as error:
+        raise AuthError("Google returned an invalid token response.") from error
+
+    if not isinstance(token_res, dict):
+        raise AuthError("Google returned an invalid token response.")
 
     access_token = token_res.get("access_token")
-    if not access_token:
+    if not isinstance(access_token, str) or not access_token:
         raise AuthError("Token endpoint returned no access_token.")
 
     refresh_token = token_res.get("refresh_token")
     id_token = token_res.get("id_token")
-    expires_in = int(token_res.get("expires_in", 3600))
+    if refresh_token is not None and not isinstance(refresh_token, str):
+        raise AuthError("Google returned an invalid refresh token.")
+    if id_token is not None and not isinstance(id_token, str):
+        raise AuthError("Google returned an invalid identity token.")
+    try:
+        expires_in = int(token_res.get("expires_in", 3600))
+    except (TypeError, ValueError) as error:
+        raise AuthError("Google returned an invalid token lifetime.") from error
+    if expires_in <= 0:
+        raise AuthError("Google returned an invalid token lifetime.")
     expires_at = time.time() + expires_in
 
     token_set = TokenSet(
@@ -534,7 +604,6 @@ class AuthenticationManager:
         config = get_google_config()
         data = urllib.parse.urlencode({
             "client_id": config["client_id"],
-            "client_secret": config["client_secret"],
             "refresh_token": tokens.refresh_token,
             "grant_type": "refresh_token",
         }).encode("utf-8")
@@ -548,17 +617,28 @@ class AuthenticationManager:
         try:
             with urllib.request.urlopen(req, timeout=15) as resp:
                 token_res = json.loads(resp.read().decode("utf-8"))
-        except (urllib.error.URLError, json.JSONDecodeError, OSError):
+        except (urllib.error.URLError, json.JSONDecodeError, OSError, UnicodeError):
+            return False
+        if not isinstance(token_res, dict):
             return False
 
         new_access_token = token_res.get("access_token")
-        if not new_access_token:
+        if not isinstance(new_access_token, str) or not new_access_token:
             return False
 
-        expires_in = int(token_res.get("expires_in", 3600))
+        try:
+            expires_in = int(token_res.get("expires_in", 3600))
+        except (TypeError, ValueError):
+            return False
+        if expires_in <= 0:
+            return False
         expires_at = time.time() + expires_in
         new_refresh_token = token_res.get("refresh_token") or tokens.refresh_token
         new_id_token = token_res.get("id_token") or tokens.id_token
+        if not isinstance(new_refresh_token, (str, type(None))) or not isinstance(
+            new_id_token, (str, type(None))
+        ):
+            return False
 
         updated_tokens = TokenSet(
             access_token=new_access_token,
@@ -622,20 +702,26 @@ def login(timeout_seconds: int = 120) -> UserProfile | None:
 
     state = generate_state()
     code_verifier, code_challenge = generate_pkce_pair()
-    auth_url = build_authorization_url(state, code_challenge)
-
     config = get_google_config()
-    parsed_redirect = urllib.parse.urlparse(config.get("redirect_uri", "http://localhost:8080"))
-    port = parsed_redirect.port or 8080
+    parsed_redirect = urllib.parse.urlparse(config["redirect_uri"])
+    requested_port = parsed_redirect.port or 0
 
     OAuthCallbackHandler.received_code = None
     OAuthCallbackHandler.received_state = None
     OAuthCallbackHandler.received_error = None
 
     try:
-        server = SingleRequestHTTPServer(("localhost", port), OAuthCallbackHandler)
+        server = SingleRequestHTTPServer(("127.0.0.1", requested_port), OAuthCallbackHandler)
     except OSError as e:
-        raise AuthError(f"Could not start local HTTP server on port {port}: {e}") from e
+        port_label = str(requested_port) if requested_port else "an available port"
+        raise AuthError(f"Could not start the local sign-in listener on {port_label}.") from e
+
+    bound_port = int(server.server_address[1])
+    redirect_uri = urllib.parse.urlunparse(
+        parsed_redirect._replace(netloc=f"127.0.0.1:{bound_port}")
+    )
+    flow_config = {**config, "redirect_uri": redirect_uri}
+    auth_url = build_authorization_url(state, code_challenge, config=flow_config)
 
     server.timeout = timeout_seconds
 
@@ -650,8 +736,10 @@ def login(timeout_seconds: int = 120) -> UserProfile | None:
     except (webbrowser.Error, OSError) as err:
         logger.debug(f"Webbrowser open failed: {err}")
 
-    server.handle_request()
-    server.server_close()
+    try:
+        server.handle_request()
+    finally:
+        server.server_close()
 
     if OAuthCallbackHandler.received_error:
         raise UserCancelledError("Authentication was cancelled in browser.")
@@ -665,6 +753,10 @@ def login(timeout_seconds: int = 120) -> UserProfile | None:
     if cb_state != state:
         raise StateMismatchError("OAuth state verification failed. Possible CSRF attack.")
 
-    tokens, user_profile = exchange_code_for_tokens(code, code_verifier)
+    tokens, user_profile = exchange_code_for_tokens(
+        code,
+        code_verifier,
+        config=flow_config,
+    )
     _token_store.store_session(user_profile, tokens)
     return user_profile

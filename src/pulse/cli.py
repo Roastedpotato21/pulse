@@ -14,6 +14,7 @@ from rich.table import Table
 
 from pulse import __version__
 from pulse.auth import (
+    AuthConfigurationError,
     AuthenticationManager,
     AuthError,
     AuthTimeoutError,
@@ -537,15 +538,15 @@ def _handle_login_command() -> bool:
     except StateMismatchError:
         print_error("Authentication state mismatch. Possible security issue.")
         sys.exit(1)
+    except AuthConfigurationError:
+        print_error("Google sign-in is unavailable in this installation.")
+        print_info(
+            "Install the latest official pulse-coding-agent release. "
+            "Product authentication never requires a workspace .env file."
+        )
+        sys.exit(1)
     except AuthError as e:
         print_error(f"Authentication failed: {e}")
-        sys.exit(1)
-    except ValueError as e:
-        print_error(f"Configuration error: {e}")
-        print_info(
-            "Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in your .env file.\n"
-            "See .env.example and the README for setup instructions."
-        )
         sys.exit(1)
 
 

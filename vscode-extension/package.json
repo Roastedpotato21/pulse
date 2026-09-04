@@ -2,14 +2,14 @@
   "name": "pulse-vscode",
   "displayName": "Pulse",
   "description": "Chat with the local Pulse project agent.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "engines": { "vscode": "^1.95.0" },
   "categories": ["Other"],
   "activationEvents": ["onView:pulse.chat", "onCommand:pulse.openChat"],
   "main": "./out/extension.js",
   "repository": {
     "type": "git",
-    "url": "https://github.com/your-org/pulse.git"
+    "url": "https://github.com/Roastedpotato21/pulse.git"
   },
   "contributes": {
     "configuration": {

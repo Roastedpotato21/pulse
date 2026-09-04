@@ -5,8 +5,15 @@ pre-1.0 APIs may change with release notes and migration guidance.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-09-04
+
 ### Added
 
+- Product-owned Google Desktop OAuth configuration is embedded in official
+  builds, so installed users can sign in without creating a `.env` file.
+- Release verification now rejects missing/placeholder OAuth configuration,
+  confidential client secrets, developer-only source content, and local home
+  directory paths in published artifacts.
 - Post-login BYOK onboarding now guides provider and model selection before
   collecting the selected provider key through hidden terminal input.
 - Provider keys are stored in workspace-scoped native OS credential-vault
@@ -14,6 +21,10 @@ pre-1.0 APIs may change with release notes and migration guidance.
 
 ### Changed
 
+- Google login uses PKCE with a dynamically allocated `127.0.0.1` callback port
+  and no confidential client secret in the distributed application.
+- Source distributions contain only the files needed to build and understand
+  the product, rather than repository tests, scripts, evals, and local templates.
 - Successful key set or rotation migrates that provider away from a legacy
   plaintext workspace `.env` entry without ever displaying the secret.
 

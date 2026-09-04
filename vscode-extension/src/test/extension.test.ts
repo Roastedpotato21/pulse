@@ -5,6 +5,6 @@ suite('Extension Test Suite', () => {
 	vscode.window.showInformationMessage('Start all tests.');
 
 	test('Extension should be present', () => {
-		assert.ok(vscode.extensions.getExtension('your-org.pulse-vscode'));
+		assert.ok(vscode.extensions.all.some(extension => extension.packageJSON.name === 'pulse-vscode'));
 	});
 });

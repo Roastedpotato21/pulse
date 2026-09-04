@@ -2,8 +2,8 @@
 
 Date: 2026-08-30
 Auditor role: application security, Python release engineering, QA
-Workspace: `C:\Users\sindh\OneDrive\Desktop\pulse`
-Package: `pulse-coding-agent` 0.1.0
+Workspace: `<local-workspace>`
+Package: `pulse-coding-agent` 0.1.1
 Local audit platform: Windows, Python 3.12.13
 
 ## Verdict
@@ -11,6 +11,23 @@ Local audit platform: Windows, Python 3.12.13
 Deployment verdict: BLOCKED for public release until external gates complete.
 
 The local Windows security, packaging, and installed-wheel checks are green after remediation. I am not marking the release ready because this audit did not execute the hosted Linux/macOS/Python 3.11/Python 3.13 matrix, live Docker no-skip gates, or live provider e2e gates. Those are material for this package because it executes commands, handles credentials, and exposes local/remote RPC surfaces.
+
+### 2026-09-04 Google sign-in packaging follow-up
+
+The clean-install failure was traced to workspace-owned `GOOGLE_CLIENT_ID` and
+`GOOGLE_CLIENT_SECRET` values. The product now loads an embedded public Google
+Desktop client identity, uses PKCE with a dynamically allocated `127.0.0.1`
+callback port, and sends no client secret. The user-facing `.env` template and
+unused `python-dotenv` dependency were removed. Official builds fail if the
+public client ID is missing or malformed, and a protected live gate asks
+Google's token endpoint to reject any client that still requires a secret.
+
+Current local evidence: 451 non-Docker tests passed, 5 were platform-skipped,
+and 12 live-Docker tests were deselected. Ruff, mypy, artifact verification, a
+34-package clean-wheel install, exact local-secret comparison, and internal-path
+scans passed. The public release remains blocked until a Google **Desktop app**
+client ID is stored in the `PULSE_GOOGLE_CLIENT_ID` Actions variable and the
+hosted release gates pass.
 
 ## Executive Summary
 
@@ -33,6 +50,7 @@ I found no known third-party dependency vulnerabilities with `pip-audit`. I foun
 | F-07 | Medium | Release artifact verifier did not reject archive traversal/link/special-file members | CWE-22, CWE-59 | Fixed |
 | F-08 | Medium | MCP subprocess/HTTP client boundary allowed exception reflection and non-loopback HTTP endpoints | CWE-200, CWE-918 | Fixed |
 | F-09 | Medium | CLI/server entrypoints could expose tracebacks for startup/import validation failures | CWE-209 | Fixed |
+| F-10 | High | Published CLI required a workspace OAuth secret/configuration file and shipped without a product client identity | CWE-522, CWE-668 | Fixed in code; release configuration required |
 
 Notable code locations:
 
@@ -143,7 +161,7 @@ Because those fixes are not committed or pushed yet, hosted CI has not verified 
 | --- | --- | --- | ---: | --- |
 | Release state | FAIL | `git status --short` was initially clean at `646b6d2143160737c995252de7919cde9d36682f`; verifier fixes now leave `OPERATIONS.md`, `src/pulse/cli.py`, `src/pulse/sandbox/secrets.py`, `tests/test_cli_entrypoint.py`, and `tests/test_security_audit_regressions.py` modified, plus this report update. | 0 | Commit and push verifier fixes, then rerun hosted CI. |
 | Whitespace | PASS | `git diff --check` clean; only LF-to-CRLF advisory warnings. | 0 | None. |
-| Tracked file hygiene | PASS | `git ls-files` scan matched only `.env.example`; no tracked `.env`, venv, logs, caches, databases, generated credentials, or audit venvs. | 0 | None. |
+| Tracked file hygiene | PASS | No tracked `.env`, virtual environment, log, cache, database, generated credential, or audit-environment files. | 0 | None. |
 | `uv sync --locked` | PASS | Initial sandbox run failed on uv cache permission; escalated run resolved 76 packages and checked 68 packages. | 0 | None. |
 | Ruff | PASS | `uv run ruff check src tests scripts` returned “All checks passed!”. | 0 | None. |
 | Mypy | PASS | `uv run mypy` returned “Success: no issues found in 5 source files”. | 0 | None. |
@@ -154,7 +172,7 @@ Because those fixes are not committed or pushed yet, hosted CI has not verified 
 | Artifact verifier | PASS | `uv run python scripts/verify_release_artifacts.py dist`: wheel and sdist verified for version 0.1.0. | 0 | None. |
 | Local Docker live gate | FAIL | `docker version`, `docker info`, and both requested `docker run` commands failed because `docker` is not installed/available in this shell. `scripts/run_docker_release_tests.py release-metadata/docker-release.xml` exited with “Docker CLI is required”. | 1 | Run on a host with Docker or rely on hosted Docker-security evidence after current fixes are pushed. |
 | Podman live gate | PENDING | Docs and code claim Podman support; `podman --version` failed because `podman` is not installed/available locally. No complete live Podman gate was found/run. | 1 | Add/run an explicit Podman live release gate or narrow the support claim. |
-| Installed wheel | PASS | Clean temp venv outside repo: `C:\Users\sindh\AppData\Local\Temp\pulse-wheel-verify-e2ae5107fe274114945aae66e4f32101`; wheel installed 35 packages; dynamic command inventory and safe-failure matrix completed without hangs, tracebacks, or canary output after the CLI fix. | 0 | None after committing verifier fix. |
+| Installed wheel | PASS | Clean temporary environment outside the repository; wheel installed 35 packages; dynamic command inventory and safe-failure matrix completed without hangs, tracebacks, or canary output after the CLI fix. | 0 | None after committing verifier fix. |
 | CLI command inventory | PASS | Discovered commands: `version`, `ask`, `model`, `keys`, `chat`, `status`, `doctor`, `mutations`, `edit`, `patch`, `rollback`, `index`, `search`, `symbols`, `verify`, `git`, `memory`, `ci`, `tasks`, `task`, `resume`, `cancel`, `sessions`, `session`, `resume-session`, `login`, `logout`, `whoami`, `auth-status`, `serve`; nested `keys` and `chat` commands verified. `eval`/`evals` absent by parser inventory. | 0 | None. |
 | Canary leakage | PASS | Final fake-canary exercise for `PULSE_RELEASE_SECRET_7F13C9` and `PULSE_INTERNAL_TRACE_51AC77` reported no provider/RPC/remote result/remote stream leaks, no file hits, and no wheel/sdist archive hits. | 0 | None after committing verifier scrubber fix. |
 | Protected live-provider smoke | PENDING | `pulse keys list` found only `openrouter` configured from legacy workspace `.env`; no protected/keyring-backed release credential was available, and no real provider prompt was sent. | 0 | Configure protected release credential and run installed-wheel smoke prompt. |

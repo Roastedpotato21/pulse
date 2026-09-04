@@ -44,7 +44,7 @@ def test_version_subcommand_matches_version_flag() -> None:
         [*command, "--version"], check=True, capture_output=True, text=True, env=_module_env()
     )
 
-    assert version.stdout.strip() == flag.stdout.strip() == "pulse 0.1.0"
+    assert version.stdout.strip() == flag.stdout.strip() == "pulse 0.1.1"
 
 
 def test_provider_key_rotation_never_returns_or_duplicates_secret(
@@ -198,6 +198,33 @@ def test_successful_login_onboards_provider_model_and_hidden_key(
     assert "BYOK setup complete" in output
     assert secret not in output
     assert secret in memory_provider_keyring.credentials.values()
+    assert not (tmp_path / ".env").exists()
+
+
+def test_login_configuration_error_never_instructs_user_to_create_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from pulse import cli
+    from pulse.auth import AuthConfigurationError
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "is_authenticated", lambda: False)
+    monkeypatch.setattr(
+        cli,
+        "login",
+        lambda: (_ for _ in ()).throw(AuthConfigurationError("missing")),
+    )
+
+    with pytest.raises(SystemExit):
+        cli._handle_login_command()
+
+    output = capsys.readouterr().out
+    assert "latest official pulse-coding-agent release" in output
+    assert "Set GOOGLE_CLIENT" not in output
+    assert "create a .env" not in output
+    assert not (tmp_path / ".env").exists()
 
 
 def test_keys_without_subcommand_opens_manager_and_rotates_without_disclosure(

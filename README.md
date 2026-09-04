@@ -5,7 +5,7 @@ It combines repository-aware planning, durable task state, explicit mutation
 controls, sandboxed command execution, provider routing, audit trails, and cost
 tracking in one Python package.
 
-> **Public beta — 0.1.0:** Pulse is supported for controlled, local,
+> **Public beta — 0.1.1:** Pulse is supported for controlled, local,
 > single-user use. The remote worker and VS Code extension are included for
 > evaluation and development, but they are not supported as multi-tenant or
 > unattended production services.
@@ -19,14 +19,23 @@ tracking in one Python package.
 
 ## Install
 
-Install the first beta from PyPI:
+Install the first beta from PyPI with `pip`:
 
 ```bash
-uv tool install pulse-coding-agent==0.1.0
+python -m pip install pulse-coding-agent==0.1.1
 ```
 
-Alternatively, use `pipx install pulse-coding-agent==0.1.0` or install it in a
-dedicated virtual environment with `pip`.
+The PyPI distribution name is `pulse-coding-agent`; the Python import and
+installed command are both `pulse`. Do not run `pip install pulse`: that name
+belongs to an unrelated WSGI package published in 2009.
+
+For an isolated command-line installation, use `uv` or `pipx`:
+
+```bash
+uv tool install pulse-coding-agent==0.1.1
+```
+
+Alternatively, use `pipx install pulse-coding-agent==0.1.1`.
 
 ## Quick start
 
@@ -40,9 +49,10 @@ pulse ask "Explain this repository and identify the highest-risk missing test"
 
 After Google login, Pulse guides provider selection, model selection, and hidden
 BYOK entry. New provider keys are stored in the native OS credential vault.
-Credentials can also be supplied through environment variables such as `OPENAI_API_KEY`,
-`ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, or `OPENROUTER_API_KEY`. Do not commit a
-populated `.env` file.
+The official distribution already contains Pulse's public Google Desktop OAuth
+identity; installed users do not create a `.env` file or provide OAuth client
+credentials. Provider API keys are collected through hidden terminal input and
+are not written to the project.
 
 To run commands without installing Docker on the client workstation, configure
 a remote worker:
@@ -122,12 +132,13 @@ prompt with hidden input; provider keys are never accepted as command-line
 arguments or printed back to the terminal. New keys are stored in a
 workspace-scoped entry in the native OS credential vault. Existing `.env` keys
 remain readable for compatibility and are removed for that provider after a
-successful vault-backed set or rotation. Environment variables and external
-secret managers remain supported as fallback sources.
+successful vault-backed set or rotation. Pulse never creates a `.env` file.
+Process environment variables and external secret managers remain supported as
+operator-managed fallback sources.
 
 ## Supported boundary
 
-The 0.1.0 beta supports the local CLI and loopback RPC server for one trusted
+The 0.1.1 beta supports the local CLI and loopback RPC server for one trusted
 user on one workstation. Pulse does not claim a security boundary between
 mutually untrusted tenants. Do not expose `pulse-rpc` or `pulse-remote` directly
 to the public internet.
@@ -159,7 +170,7 @@ uv run ruff check src tests scripts
 uv run mypy
 uv run pytest tests/ -k "not sandbox" --cov=pulse --cov-report=term-missing --cov-fail-under=54
 uv build
-uv run python scripts/verify_release_artifacts.py dist --expected-version 0.1.0
+uv run python scripts/verify_release_artifacts.py dist --expected-version 0.1.1
 ```
 
 Docker security tests require a working Docker daemon and are enforced by the

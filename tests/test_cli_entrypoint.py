@@ -87,4 +87,4 @@ def test_entrypoint_reports_package_version(module: str, program: str) -> None:
         text=True,
     )
 
-    assert result.stdout.strip() == f"{program} 0.1.0"
+    assert result.stdout.strip() == f"{program} 0.1.1"

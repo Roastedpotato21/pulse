@@ -1,9 +1,11 @@
 import json
 import time
+import urllib.parse
 
 import pytest
 
 from pulse.auth import (
+    AuthConfigurationError,
     AuthenticationManager,
     AuthError,
     SecureTokenStore,
@@ -15,7 +17,9 @@ from pulse.auth import (
     generate_pkce_pair,
     generate_state,
     get_current_user,
+    get_google_config,
     is_authenticated,
+    login,
     logout,
     refresh_session,
     set_token_store_workspace,
@@ -90,18 +94,87 @@ def test_is_authenticated_initial_state(auth_workspace):
 
 
 def test_authorization_url_construction(monkeypatch):
-    monkeypatch.setenv("GOOGLE_CLIENT_ID", "my_test_client_id")
-    monkeypatch.setenv("GOOGLE_REDIRECT_URI", "http://localhost:8080")
+    monkeypatch.setenv(
+        "PULSE_GOOGLE_CLIENT_ID",
+        "123456789012-my_test_client_id.apps.googleusercontent.com",
+    )
+    monkeypatch.setenv("PULSE_GOOGLE_REDIRECT_URI", "http://127.0.0.1:8080")
 
     state = "test_state_123"
     code_challenge = "test_challenge_456"
 
     url = build_authorization_url(state, code_challenge)
     assert "https://accounts.google.com/o/oauth2/v2/auth" in url
-    assert "client_id=my_test_client_id" in url
+    assert "client_id=123456789012-my_test_client_id.apps.googleusercontent.com" in url
     assert "state=test_state_123" in url
     assert "code_challenge=test_challenge_456" in url
     assert "code_challenge_method=S256" in url
+
+
+def test_google_config_never_reads_workspace_env_file(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text(
+        "GOOGLE_CLIENT_ID=999999999999-leaked.apps.googleusercontent.com\n"
+        "GOOGLE_CLIENT_SECRET=must-not-be-loaded\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("PULSE_GOOGLE_CLIENT_ID", raising=False)
+    monkeypatch.delenv("PULSE_GOOGLE_REDIRECT_URI", raising=False)
+
+    with pytest.raises(AuthConfigurationError, match="does not include"):
+        get_google_config()
+
+
+def test_google_config_rejects_non_loopback_redirect(monkeypatch):
+    monkeypatch.setenv(
+        "PULSE_GOOGLE_CLIENT_ID",
+        "123456789012-valid.apps.googleusercontent.com",
+    )
+    monkeypatch.setenv("PULSE_GOOGLE_REDIRECT_URI", "https://example.com/callback")
+
+    with pytest.raises(AuthConfigurationError, match="callback configuration"):
+        get_google_config()
+
+
+def test_login_uses_an_available_loopback_port(auth_workspace, monkeypatch):
+    from pulse import auth
+
+    captured: dict[str, str] = {}
+    user = UserProfile(email="user@example.com", name="User", sub="subject")
+    tokens = TokenSet(access_token="access", expires_at=time.time() + 3600)
+
+    class FakeServer:
+        def __init__(self, address, _handler):
+            assert address == ("127.0.0.1", 0)
+            self.server_address = ("127.0.0.1", 43123)
+            self.timeout = None
+
+        def handle_request(self):
+            auth.OAuthCallbackHandler.received_code = "authorization-code"
+            auth.OAuthCallbackHandler.received_state = "fixed-state"
+
+        def server_close(self):
+            captured["closed"] = "yes"
+
+    def fake_exchange(_code, _verifier, *, config):
+        captured["exchange_redirect"] = config["redirect_uri"]
+        return tokens, user
+
+    monkeypatch.setenv(
+        "PULSE_GOOGLE_CLIENT_ID",
+        "123456789012-client.apps.googleusercontent.com",
+    )
+    monkeypatch.delenv("PULSE_GOOGLE_REDIRECT_URI", raising=False)
+    monkeypatch.setattr(auth, "generate_state", lambda: "fixed-state")
+    monkeypatch.setattr(auth, "generate_pkce_pair", lambda: ("verifier", "challenge"))
+    monkeypatch.setattr(auth, "SingleRequestHTTPServer", FakeServer)
+    monkeypatch.setattr(auth, "exchange_code_for_tokens", fake_exchange)
+    monkeypatch.setattr(auth.webbrowser, "open", lambda url: captured.setdefault("url", url))
+
+    assert login(timeout_seconds=1) == user
+    assert "redirect_uri=http%3A%2F%2F127.0.0.1%3A43123" in captured["url"]
+    assert captured["exchange_redirect"] == "http://127.0.0.1:43123"
+    assert captured["closed"] == "yes"
 
 
 class MockHTTPResponse:
@@ -120,8 +193,10 @@ class MockHTTPResponse:
 
 
 def test_exchange_code_for_tokens(auth_workspace, monkeypatch):
-    monkeypatch.setenv("GOOGLE_CLIENT_ID", "client123")
-    monkeypatch.setenv("GOOGLE_CLIENT_SECRET", "secret456")
+    monkeypatch.setenv(
+        "PULSE_GOOGLE_CLIENT_ID",
+        "123456789012-client.apps.googleusercontent.com",
+    )
 
     id_token = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiI5ODciLCJlbWFpbCI6ImFsaWNlQGV4YW1wbGUuY29tIiwibmFtZSI6IkFsaWNlIn0.sig"
 
@@ -132,6 +207,9 @@ def test_exchange_code_for_tokens(auth_workspace, monkeypatch):
                 "name": "Alice",
                 "sub": "987",
             }).encode("utf-8"))
+        request_values = urllib.parse.parse_qs(req.data.decode("utf-8"))
+        assert "client_secret" not in request_values
+        assert request_values["code_verifier"] == ["verifier_456"]
         return MockHTTPResponse(json.dumps({
             "access_token": "acc_token_abc",
             "refresh_token": "ref_token_xyz",
@@ -151,8 +229,10 @@ def test_exchange_code_for_tokens(auth_workspace, monkeypatch):
 
 
 def test_exchange_rejects_unverified_id_token_identity(auth_workspace, monkeypatch):
-    monkeypatch.setenv("GOOGLE_CLIENT_ID", "client123")
-    monkeypatch.setenv("GOOGLE_CLIENT_SECRET", "secret456")
+    monkeypatch.setenv(
+        "PULSE_GOOGLE_CLIENT_ID",
+        "123456789012-client.apps.googleusercontent.com",
+    )
     forged = "e30.eyJzdWIiOiJhdHRhY2tlciIsImVtYWlsIjoiYXR0YWNrZXJAZXhhbXBsZS5jb20ifQ.invalid"
 
     def mock_urlopen(req, *args, **kwargs):
@@ -170,9 +250,35 @@ def test_exchange_rejects_unverified_id_token_identity(auth_workspace, monkeypat
         exchange_code_for_tokens("auth-code", "verifier")
 
 
+@pytest.mark.parametrize(
+    "payload, message",
+    [
+        (b"not-json", "invalid token response"),
+        (b"[]", "invalid token response"),
+        (json.dumps({"access_token": "token", "expires_in": "never"}).encode(), "lifetime"),
+    ],
+)
+def test_exchange_maps_malformed_google_responses_to_safe_auth_errors(
+    auth_workspace, monkeypatch, payload, message
+):
+    monkeypatch.setenv(
+        "PULSE_GOOGLE_CLIENT_ID",
+        "123456789012-client.apps.googleusercontent.com",
+    )
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda *_args, **_kwargs: MockHTTPResponse(payload),
+    )
+
+    with pytest.raises(AuthError, match=message):
+        exchange_code_for_tokens("auth-code", "verifier")
+
+
 def test_refresh_session_success(auth_workspace, monkeypatch):
-    monkeypatch.setenv("GOOGLE_CLIENT_ID", "client123")
-    monkeypatch.setenv("GOOGLE_CLIENT_SECRET", "secret456")
+    monkeypatch.setenv(
+        "PULSE_GOOGLE_CLIENT_ID",
+        "123456789012-client.apps.googleusercontent.com",
+    )
 
     store = SecureTokenStore(auth_workspace)
     user = UserProfile(email="bob@example.com", name="Bob", sub="555")
@@ -181,6 +287,8 @@ def test_refresh_session_success(auth_workspace, monkeypatch):
     store.store_session(user, tokens)
 
     def mock_urlopen_refresh(req, *args, **kwargs):
+        request_values = urllib.parse.parse_qs(req.data.decode("utf-8"))
+        assert "client_secret" not in request_values
         return MockHTTPResponse(json.dumps({
             "access_token": "new_refreshed_access_token",
             "expires_in": 3600,

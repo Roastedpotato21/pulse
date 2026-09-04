@@ -2,7 +2,7 @@
 
 ## Supported release boundary
 
-Version 0.1.0 is a public beta for local, single-user CLI use. The supported
+Version 0.1.1 is a public beta for local, single-user CLI use. The supported
 artifact is the `pulse-coding-agent` Python distribution and its loopback
 JSON-RPC server. The remote worker is available for controlled evaluation but
 is not approved for multi-tenant or unattended production use.
@@ -143,19 +143,24 @@ threat boundary.
 
 ## Release procedure
 
-1. Update `CHANGELOG.md`; make version values agree in `pyproject.toml` and
+1. Create a Google OAuth client with application type **Desktop app**. Store its
+   public client ID in the repository Actions variable
+   `PULSE_GOOGLE_CLIENT_ID`. Do not configure or distribute a Web-client secret.
+2. Update `CHANGELOG.md`; make version values agree in `pyproject.toml` and
    `pulse.__version__`.
-2. Run the full local release verification and push the commits.
-3. Wait for required CI checks on the release commit, including live Docker
+3. Run the full local release verification and push the commits.
+4. Wait for required CI checks on the release commit, including live Docker
    security tests.
-4. Confirm the protected `public-beta` and `pypi` environments, provider secret,
+5. Confirm the protected `public-beta` and `pypi` environments, provider secret,
    and PyPI trusted-publisher mapping are configured.
-5. Push tag `vX.Y.Z`. Do not manually create the GitHub Release.
-6. The protected tag workflow rebuilds and verifies the source, runs the live
+6. Push tag `vX.Y.Z`. Do not manually create the GitHub Release.
+7. The protected tag workflow embeds the public Desktop client ID, rebuilds and
+   verifies the source, runs the live
    provider and no-skip Docker security gates, publishes to PyPI through OIDC,
    then creates the GitHub Release. It attaches SHA-256 checksums, a
    source-bound manifest, evaluation evidence, and a CycloneDX SBOM.
 
 The `public-beta` environment requires `OPENAI_API_KEY` and may set
 `PULSE_E2E_MODEL`. The `pypi` environment must match the trusted publisher for
-`.github/workflows/release.yml`.
+`.github/workflows/release.yml`. The release build fails before publication when
+`PULSE_GOOGLE_CLIENT_ID` is absent or malformed.

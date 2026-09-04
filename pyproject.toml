@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pulse-coding-agent"
-version = "0.1.0"
+version = "0.1.1"
 description = "Permissioned coding-agent CLI with durable planning and isolated execution."
 readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.11,<3.14"
@@ -26,7 +26,6 @@ dependencies = [
     "keyring==25.7.0",
     "openai==2.44.0",
     "prompt-toolkit==3.0.52",
-    "python-dotenv==1.2.2",
     "rich==15.0.0",
     "typer==0.26.8",
     "websockets==16.1",
@@ -53,19 +52,11 @@ packages = ["src/pulse"]
 [tool.hatch.build.targets.sdist]
 include = [
     "/src",
-    "/scripts",
-    "/tests",
-    "/evals",
     "/README.md",
-    "/ARCHITECTURE.md",
-    "/OPERATIONS.md",
     "/SECURITY.md",
     "/PRIVACY.md",
     "/CHANGELOG.md",
-    "/agent.config.json",
-    "/.env.example",
     "/pyproject.toml",
-    "/uv.lock",
 ]
 
 [tool.pytest.ini_options]
