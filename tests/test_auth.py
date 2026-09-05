@@ -297,7 +297,9 @@ def test_google_config_rejects_non_loopback_redirect(monkeypatch):
         get_google_config()
 
 
-def test_login_uses_an_available_loopback_port(auth_workspace, monkeypatch):
+def test_login_uses_an_available_loopback_port(
+    auth_workspace, monkeypatch, capsys
+):
     from pulse import auth
 
     captured: dict[str, str] = {}
@@ -325,7 +327,8 @@ def test_login_uses_an_available_loopback_port(auth_workspace, monkeypatch):
         "PULSE_GOOGLE_CLIENT_ID",
         "123456789012-client.apps.googleusercontent.com",
     )
-    monkeypatch.delenv("PULSE_GOOGLE_REDIRECT_URI", raising=False)
+    # A stale fixed redirect must never send the callback to IIS on port 80.
+    monkeypatch.setenv("PULSE_GOOGLE_REDIRECT_URI", "http://127.0.0.1:80")
     monkeypatch.setattr(auth, "generate_state", lambda: "fixed-state")
     monkeypatch.setattr(auth, "generate_pkce_pair", lambda: ("verifier", "challenge"))
     monkeypatch.setattr(auth, "SingleRequestHTTPServer", FakeServer)
@@ -336,6 +339,7 @@ def test_login_uses_an_available_loopback_port(auth_workspace, monkeypatch):
     assert "redirect_uri=http%3A%2F%2F127.0.0.1%3A43123" in captured["url"]
     assert captured["exchange_redirect"] == "http://127.0.0.1:43123"
     assert captured["closed"] == "yes"
+    assert "Local callback listener: http://127.0.0.1:43123" in capsys.readouterr().out
 
 
 class MockHTTPResponse:

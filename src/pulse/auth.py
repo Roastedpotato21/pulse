@@ -1160,23 +1160,23 @@ def login(timeout_seconds: int = 120) -> UserProfile | None:
     state = generate_state()
     code_verifier, code_challenge = generate_pkce_pair()
     config = get_google_config()
-    parsed_redirect = urllib.parse.urlparse(config["redirect_uri"])
-    requested_port = parsed_redirect.port or 0
 
     OAuthCallbackHandler.received_code = None
     OAuthCallbackHandler.received_state = None
     OAuthCallbackHandler.received_error = None
 
     try:
-        server = SingleRequestHTTPServer(("127.0.0.1", requested_port), OAuthCallbackHandler)
+        # Desktop OAuth clients should always own an ephemeral loopback port.
+        # Honoring a fixed override can hand the callback to IIS or another
+        # local service instead of Pulse (port 80 is a common collision).
+        server = SingleRequestHTTPServer(("127.0.0.1", 0), OAuthCallbackHandler)
     except OSError as e:
-        port_label = str(requested_port) if requested_port else "an available port"
-        raise AuthError(f"Could not start the local sign-in listener on {port_label}.") from e
+        raise AuthError(
+            "Could not start the local sign-in listener on an available loopback port."
+        ) from e
 
     bound_port = int(server.server_address[1])
-    redirect_uri = urllib.parse.urlunparse(
-        parsed_redirect._replace(netloc=f"127.0.0.1:{bound_port}")
-    )
+    redirect_uri = f"http://127.0.0.1:{bound_port}"
     flow_config = {**config, "redirect_uri": redirect_uri}
     auth_url = build_authorization_url(state, code_challenge, config=flow_config)
 
@@ -1186,6 +1186,7 @@ def login(timeout_seconds: int = 120) -> UserProfile | None:
     print("Opening your browser...\n")
     print("If your browser doesn't open automatically, visit:\n")
     print(f"{auth_url}\n")
+    print(f"Local callback listener: {redirect_uri}\n")
     print("Waiting for authentication...\n")
 
     try:
@@ -1205,7 +1206,11 @@ def login(timeout_seconds: int = 120) -> UserProfile | None:
     cb_state = OAuthCallbackHandler.received_state
 
     if not code:
-        raise AuthTimeoutError("Authentication timed out waiting for browser login callback.")
+        raise AuthTimeoutError(
+            "Authentication timed out waiting for the browser callback at "
+            f"{redirect_uri}. If the browser opened another local page, make sure "
+            "this checkout is current and launch it with `uv run pulse login`."
+        )
 
     if cb_state != state:
         raise StateMismatchError("OAuth state verification failed. Possible CSRF attack.")

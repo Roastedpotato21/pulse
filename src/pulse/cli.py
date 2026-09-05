@@ -592,8 +592,8 @@ def _handle_login_command() -> bool:
     except UserCancelledError:
         print_error("Authentication was cancelled in the browser.")
         sys.exit(1)
-    except AuthTimeoutError:
-        print_error("Authentication timed out waiting for browser callback.")
+    except AuthTimeoutError as error:
+        print_error(str(error))
         sys.exit(1)
     except StateMismatchError:
         print_error("Authentication state mismatch. Possible security issue.")
