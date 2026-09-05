@@ -1180,8 +1180,6 @@ def login(timeout_seconds: int = 120) -> UserProfile | None:
     flow_config = {**config, "redirect_uri": redirect_uri}
     auth_url = build_authorization_url(state, code_challenge, config=flow_config)
 
-    server.timeout = timeout_seconds
-
     print("Pulse Authentication\n")
     print("Opening your browser...\n")
     print("If your browser doesn't open automatically, visit:\n")
@@ -1194,8 +1192,17 @@ def login(timeout_seconds: int = 120) -> UserProfile | None:
     except (webbrowser.Error, OSError) as err:
         logger.debug(f"Webbrowser open failed: {err}")
 
+    deadline = time.monotonic() + timeout_seconds
     try:
-        server.handle_request()
+        while (
+            OAuthCallbackHandler.received_code is None
+            and OAuthCallbackHandler.received_error is None
+        ):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            server.timeout = remaining
+            server.handle_request()
     finally:
         server.server_close()
 

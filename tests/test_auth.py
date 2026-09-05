@@ -342,6 +342,49 @@ def test_login_uses_an_available_loopback_port(
     assert "Local callback listener: http://127.0.0.1:43123" in capsys.readouterr().out
 
 
+def test_login_ignores_unrelated_loopback_request_before_callback(
+    auth_workspace, monkeypatch
+):
+    from pulse import auth
+
+    calls = 0
+    user = UserProfile(email="user@example.com", name="User", sub="subject")
+    tokens = TokenSet(access_token="access", expires_at=time.time() + 3600)
+
+    class FakeServer:
+        def __init__(self, address, _handler):
+            assert address == ("127.0.0.1", 0)
+            self.server_address = ("127.0.0.1", 43123)
+            self.timeout = None
+
+        def handle_request(self):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                auth.OAuthCallbackHandler.received_code = "authorization-code"
+                auth.OAuthCallbackHandler.received_state = "fixed-state"
+
+        def server_close(self):
+            pass
+
+    monkeypatch.setenv(
+        "PULSE_GOOGLE_CLIENT_ID",
+        "123456789012-client.apps.googleusercontent.com",
+    )
+    monkeypatch.setattr(auth, "generate_state", lambda: "fixed-state")
+    monkeypatch.setattr(auth, "generate_pkce_pair", lambda: ("verifier", "challenge"))
+    monkeypatch.setattr(auth, "SingleRequestHTTPServer", FakeServer)
+    monkeypatch.setattr(
+        auth,
+        "exchange_code_for_tokens",
+        lambda _code, _verifier, *, config: (tokens, user),
+    )
+    monkeypatch.setattr(auth.webbrowser, "open", lambda _url: True)
+
+    assert login(timeout_seconds=1) == user
+    assert calls == 2
+
+
 class MockHTTPResponse:
     def __init__(self, data: bytes, status: int = 200):
         self.data = data
