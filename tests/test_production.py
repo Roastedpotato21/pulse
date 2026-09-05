@@ -17,6 +17,7 @@ from pulse.production import is_secure_remote_token, run_production_checks
 from pulse.sandbox.remote.server import RemoteExecutionStore, RemoteServer
 
 STRONG_TOKEN = "A7mQ2xL9vR4pN8cK6sJ3wH5yB1dF0gZ9uT"
+SYNTHETIC_GOOGLE_CLIENT_SECRET = "GOCSPX-abcdefghijklmnopqrstuvwxyz123456"
 
 
 def test_pinned_gitleaks_action_uses_compatible_global_allowlist() -> None:
@@ -24,6 +25,7 @@ def test_pinned_gitleaks_action_uses_compatible_global_allowlist() -> None:
     assert "allowlist" in config
     assert "allowlists" not in config
     assert STRONG_TOKEN in config["allowlist"]["regexes"]
+    assert SYNTHETIC_GOOGLE_CLIENT_SECRET in config["allowlist"]["regexes"]
 
 
 def _config(workspace: Path) -> AgentConfig:
