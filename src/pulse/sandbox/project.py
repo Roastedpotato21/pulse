@@ -69,7 +69,14 @@ class ProjectSandbox:
         path = self._assert_inside_workspace(file)
         return path.read_text(encoding="utf-8", errors="replace") if path.exists() else None
 
-    def apply_approved_edit(self, file: str, content: str, reason: str) -> None:
+    def apply_approved_edit(
+        self,
+        file: str,
+        content: str,
+        reason: str,
+        *,
+        batch_id: str | None = None,
+    ) -> None:
         """Apply an edit already approved by the edit workflow.
 
         This deliberately does not consult ``allow_writes``: that setting keeps
@@ -77,7 +84,10 @@ class ProjectSandbox:
         protected by the workflow's per-edit approval.
         """
         path = self._assert_inside_workspace(file)
-        with self.mutations.transaction(command="pulse approved edit"):
+        command = "pulse approved edit"
+        if batch_id:
+            command += f":{batch_id}"
+        with self.mutations.transaction(command=command):
             path.parent.mkdir(parents=True, exist_ok=True)
             self._write_text_exact(path, content)
         self.audit.record("edited", file, f"Approved edit: {reason}")

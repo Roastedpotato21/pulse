@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import io
+from types import SimpleNamespace
 
 import pytest
 from prompt_toolkit.completion import CompleteEvent
@@ -156,3 +157,18 @@ def test_slash_parser_preserves_windows_paths() -> None:
 def test_slash_parser_reports_unclosed_quotes() -> None:
     with pytest.raises(ValueError, match="Invalid command quoting"):
         parse_slash_command('/search "unfinished')
+
+
+def test_prompt_does_not_render_the_conversation_title() -> None:
+    rendered = None
+
+    def capture_prompt(value):  # type: ignore[no-untyped-def]
+        nonlocal rendered
+        rendered = value
+        return "hello"
+
+    prompt = object.__new__(InteractivePrompt)
+    prompt.session = SimpleNamespace(prompt=capture_prompt)
+
+    assert prompt.read("a very long first conversation title") == "hello"
+    assert rendered == [("class:prompt", "pulse"), ("", "> ")]

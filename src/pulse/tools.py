@@ -92,6 +92,7 @@ class EditTool(BaseTool):
             ToolArgument("content", ArgumentKind.STRING, required=True),
             ToolArgument("reason", ArgumentKind.STRING),
             ToolArgument("approve", ArgumentKind.CALLABLE, required=True),
+            ToolArgument("batch_id", ArgumentKind.STRING),
         )
     )
 
@@ -105,7 +106,11 @@ class EditTool(BaseTool):
             raise TypeError("Edit requires an async approval handler.")
         before = await self.git.inspect() if self.git else None
         result = await self.edits.request_and_apply(
-            str(arguments["file"]), str(arguments["content"]), str(arguments.get("reason", "Requested edit")), approve
+            str(arguments["file"]),
+            str(arguments["content"]),
+            str(arguments.get("reason", "Requested edit")),
+            approve,
+            batch_id=str(arguments["batch_id"]) if arguments.get("batch_id") else None,
         )
         after = await self.git.inspect() if self.git and result.applied else None
         suggestion = after.commit_suggestion if after else None

@@ -47,6 +47,38 @@ def test_version_subcommand_matches_version_flag() -> None:
     assert version.stdout.strip() == flag.stdout.strip() == "pulse 0.1.2"
 
 
+def test_diff_command_accepts_summary_and_file_pages() -> None:
+    from pulse.cli import _build_parser
+
+    summary = _build_parser().parse_args(["diff", "--page", "2"])
+    file_page = _build_parser().parse_args(["diff", "3", "--page", "4"])
+
+    assert (summary.file, summary.page) == (None, 2)
+    assert (file_page.file, file_page.page) == ("3", 4)
+
+
+def test_checkout_mismatch_warns_with_local_entrypoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from pulse import cli
+
+    checkout_cli = tmp_path / "src" / "pulse" / "cli.py"
+    checkout_cli.parent.mkdir(parents=True)
+    checkout_cli.write_text("# checkout", encoding="utf-8")
+    installed_cli = tmp_path / "installed" / "pulse" / "cli.py"
+    installed_cli.parent.mkdir(parents=True)
+    installed_cli.write_text("# installed", encoding="utf-8")
+    monkeypatch.setattr(cli, "__file__", str(installed_cli))
+
+    assert cli._warn_if_checkout_is_not_active(tmp_path) is True
+
+    output = capsys.readouterr().out
+    assert "not running the current source checkout" in output
+    assert ".venv" in output and "pulse.exe" in output
+
+
 def test_provider_key_rotation_never_returns_or_duplicates_secret(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, memory_provider_keyring
 ) -> None:
@@ -165,6 +197,23 @@ def test_hidden_key_input_fails_closed_when_terminal_would_echo(
 
     assert cli._read_hidden_provider_key("openai") is None
     assert secret not in capsys.readouterr().out
+
+
+def test_chat_history_number_resolves_a_previous_non_active_chat(
+    tmp_path: Path,
+) -> None:
+    from pulse import cli
+    from pulse.conversations import ConversationManager
+
+    manager = ConversationManager(tmp_path)
+    previous = manager.create(title="Previous chat")
+    manager.add_turn(previous.id, "user", "hello")
+    manager.create(title="Fresh chat")
+
+    resolved = cli._resolve_conversation(manager, "1")
+
+    assert resolved is not None
+    assert resolved.id == previous.id
 
 
 def test_successful_login_onboards_provider_model_and_hidden_key(

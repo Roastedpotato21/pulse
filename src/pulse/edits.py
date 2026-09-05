@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from difflib import unified_diff
@@ -17,6 +18,22 @@ class EditProposal:
     reason: str
     unified_diff: str
 
+    @property
+    def additions(self) -> int:
+        return sum(
+            1
+            for line in self.unified_diff.splitlines()
+            if line.startswith("+") and not line.startswith("+++")
+        )
+
+    @property
+    def deletions(self) -> int:
+        return sum(
+            1
+            for line in self.unified_diff.splitlines()
+            if line.startswith("-") and not line.startswith("---")
+        )
+
 
 @dataclass(frozen=True)
 class EditResult:
@@ -24,7 +41,7 @@ class EditResult:
     applied: bool
 
 
-ApprovalHandler = Callable[[EditProposal], Awaitable[bool]]
+ApprovalHandler = Callable[[EditProposal], bool | Awaitable[bool]]
 
 
 class EditWorkflow:
@@ -51,14 +68,27 @@ class EditWorkflow:
         )
 
     async def request_and_apply(
-        self, file_path: str, content: str, reason: str, approve: ApprovalHandler
+        self,
+        file_path: str,
+        content: str,
+        reason: str,
+        approve: ApprovalHandler,
+        *,
+        batch_id: str | None = None,
     ) -> EditResult:
         proposal = await self.propose(file_path, content, reason)
-        if not await approve(proposal):
+        decision = approve(proposal)
+        approved = await decision if inspect.isawaitable(decision) else decision
+        if not approved:
             self.sandbox.record_rejected_edit(proposal.file_path, proposal.reason)
             return EditResult(proposal=proposal, applied=False)
 
-        self.sandbox.apply_approved_edit(proposal.file_path, proposal.after_content, proposal.reason)
+        self.sandbox.apply_approved_edit(
+            proposal.file_path,
+            proposal.after_content,
+            proposal.reason,
+            batch_id=batch_id,
+        )
         return EditResult(proposal=proposal, applied=True)
 
     async def rollback_last(self) -> bool:

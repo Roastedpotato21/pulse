@@ -191,9 +191,66 @@ def test_secure_token_store_reads_legacy_single_entry_session(
     assert store.load_session() == (user, tokens)
 
 
+def test_secure_token_store_persists_oauth_config_for_future_processes(
+    auth_workspace,
+):
+    store = SecureTokenStore(auth_workspace)
+    config = {
+        "client_id": "123456789012-client.apps.googleusercontent.com",
+        "client_secret": TEST_CLIENT_SECRET,
+        "redirect_uri": "http://127.0.0.1:43123",
+    }
+
+    store.store_oauth_config(config)
+
+    assert store.load_oauth_config() == config
+    store.clear_session()
+    assert store.load_oauth_config() is None
+
+
 def test_is_authenticated_initial_state(auth_workspace):
     assert is_authenticated() is False
     assert get_current_user() is None
+
+
+def test_expired_session_without_client_config_becomes_signed_out(
+    auth_workspace, monkeypatch
+):
+    from pulse import auth
+
+    store = SecureTokenStore(auth_workspace)
+    store.store_session(
+        UserProfile(email="expired@example.com"),
+        TokenSet(
+            access_token="expired-access",
+            refresh_token="refresh-token",
+            expires_at=0,
+        ),
+    )
+    monkeypatch.delenv("PULSE_GOOGLE_CLIENT_ID", raising=False)
+    monkeypatch.delenv("PULSE_GOOGLE_CLIENT_SECRET", raising=False)
+    monkeypatch.setattr(auth, "_packaged_google_config", dict)
+
+    assert AuthenticationManager(auth_workspace).is_authenticated() is False
+
+
+def test_valid_legacy_session_migrates_oauth_config(auth_workspace, monkeypatch):
+    store = SecureTokenStore(auth_workspace)
+    store.store_session(
+        UserProfile(email="legacy@example.com"),
+        TokenSet(access_token="access", expires_at=time.time() + 3600),
+    )
+    monkeypatch.setenv(
+        "PULSE_GOOGLE_CLIENT_ID",
+        "123456789012-client.apps.googleusercontent.com",
+    )
+
+    assert AuthenticationManager(auth_workspace).is_authenticated() is True
+    assert store.load_oauth_config() == {
+        "client_id": "123456789012-client.apps.googleusercontent.com",
+        "client_secret": TEST_CLIENT_SECRET,
+        "redirect_uri": "http://127.0.0.1",
+    }
 
 
 def test_authorization_url_construction(monkeypatch):

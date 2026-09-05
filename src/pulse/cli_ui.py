@@ -6,14 +6,14 @@ New exports: print_banner, print_auth_prompt, print_signed_in,
              print_provider_selection, print_model_selection, print_provider_changed_card,
              print_current_model_card, print_all_models_list,
              print_chat_list, print_chat_card, print_chat_created, print_chat_switched,
-             print_chat_exported, print_chat_search_results.
+             print_chat_exported, print_chat_history, print_chat_search_results.
 """
 from __future__ import annotations
 
 import itertools
 import subprocess
 import threading
-from collections.abc import Generator
+from collections.abc import Generator, Mapping, Sequence
 from contextlib import contextmanager
 from typing import Any
 
@@ -60,13 +60,14 @@ def _box_style() -> box.Box:
 # ── Core helpers ──────────────────────────────────────────────────────────────
 
 def _panel(title: str | None, content: Any, style: str = "") -> Panel:
-    """Adaptive panel — ROUNDED on rich terminals, ASCII on dumb ones."""
+    """Adaptive compact panel that remains stable when terminal panes resize."""
     return Panel(
         content,
         title=title,
         style=style,
         box=_box_style(),
         padding=(0, 1),
+        expand=False,
     )
 
 
@@ -157,7 +158,7 @@ _LOGO_RICH = (
     "[bold cyan]██║     ╚██████╔╝███████╗███████║███████╗[/bold cyan]\n"
     "[bold cyan]╚═╝      ╚═════╝ ╚══════╝╚══════╝╚══════╝[/bold cyan]\n\n"
     "                [bold white]Pulse AI[/bold white]\n"
-    f"      [dim]Autonomous Project Assistant  v{_VERSION}[/dim]"
+    f"       [dim]Autonomous Coding Assistant  v{_VERSION}[/dim]"
 )
 
 _LOGO_ASCII = (
@@ -167,7 +168,7 @@ _LOGO_ASCII = (
     "|  __/| |_| | |___ ___) |  _|\n"
     "|_|    \\___/|_____|____/|_|\n\n"
     "                Pulse AI\n"
-    f"      Autonomous Project Assistant  v{_VERSION}"
+    f"       Autonomous Coding Assistant  v{_VERSION}"
 )
 
 
@@ -586,6 +587,8 @@ def print_chat_card(conv: object) -> None:
     """Display a compact card showing the currently active conversation."""
     conv_id = getattr(conv, "id", "")
     title = getattr(conv, "title", "Conversation")
+    if len(title) > 48:
+        title = title[:45] + "…"
     turn_count = getattr(conv, "turn_count", 0)
     created_at = getattr(conv, "created_at", "")
     updated_at = getattr(conv, "updated_at", "")
@@ -608,8 +611,156 @@ def print_chat_card(conv: object) -> None:
             box=_box_style(),
             border_style="cyan",
             padding=(0, 2),
+            expand=False,
         )
     )
+    console.print()
+
+
+def _change_field(change: Any, name: str, default: str = "") -> str:
+    if isinstance(change, Mapping):
+        return str(change.get(name, default))
+    return str(getattr(change, name, default))
+
+
+def diff_line_counts(unified_diff: str) -> tuple[int, int]:
+    """Count changed lines while excluding unified-diff file headers."""
+    additions = sum(
+        1
+        for line in unified_diff.splitlines()
+        if line.startswith("+") and not line.startswith("+++")
+    )
+    deletions = sum(
+        1
+        for line in unified_diff.splitlines()
+        if line.startswith("-") and not line.startswith("---")
+    )
+    return additions, deletions
+
+
+def print_edit_proposal_summary(proposal: Any) -> None:
+    """Show approval-relevant edit metadata without dumping file contents."""
+    additions, deletions = diff_line_counts(_change_field(proposal, "unified_diff"))
+    file_path = escape(_change_field(proposal, "file_path", "unknown file"))
+    console.print(
+        _panel(
+            "Proposed edit",
+            f"[bold white]{file_path}[/bold white]  [green]+{additions}[/green] "
+            f"[red]-{deletions}[/red]\n[dim]Press V to review this diff page by page.[/dim]",
+            style="yellow",
+        )
+    )
+
+
+def print_edit_summary(
+    changes: Sequence[Any],
+    *,
+    page: int = 1,
+    page_size: int = 8,
+    title: str = "Edited files",
+) -> tuple[int, int]:
+    """Render a bounded file list and return the normalized page and page count."""
+    if page_size < 1:
+        raise ValueError("Diff page size must be positive.")
+    total_pages = max(1, (len(changes) + page_size - 1) // page_size)
+    normalized_page = min(max(page, 1), total_pages)
+    start = (normalized_page - 1) * page_size
+    visible = changes[start : start + page_size]
+
+    total_additions = 0
+    total_deletions = 0
+    for change in changes:
+        additions, deletions = diff_line_counts(_change_field(change, "unified_diff"))
+        total_additions += additions
+        total_deletions += deletions
+
+    table = Table.grid(expand=True, padding=(0, 1))
+    table.add_column(style="dim")
+    table.add_column(justify="right", no_wrap=True)
+    for index, change in enumerate(visible, start=start + 1):
+        additions, deletions = diff_line_counts(_change_field(change, "unified_diff"))
+        path = escape(_change_field(change, "file_path", "unknown file"))
+        table.add_row(
+            f"[dim]{index:>2}[/dim]  {path}",
+            f"[green]+{additions}[/green] [red]-{deletions}[/red]",
+        )
+
+    heading = (
+        f"[bold white]{len(changes)} file{'s' if len(changes) != 1 else ''} touched[/bold white]  "
+        f"[green]+{total_additions}[/green] [red]-{total_deletions}[/red]"
+    )
+    content = Table.grid(expand=True)
+    content.add_row(heading)
+    if visible:
+        content.add_row(table)
+    if total_pages > 1:
+        content.add_row(
+            f"[dim]Page {normalized_page}/{total_pages}. Use /diff --page N; "
+            "/diff FILE_OR_NUMBER reviews a file.[/dim]"
+        )
+    else:
+        content.add_row("[dim]Use /diff FILE_OR_NUMBER to review a file.[/dim]")
+    console.print(_panel(title, content, style="cyan"))
+    console.print()
+    return normalized_page, total_pages
+
+
+def print_diff_page(
+    file_path: str,
+    unified_diff: str,
+    *,
+    page: int = 1,
+    page_size: int = 60,
+) -> tuple[int, int]:
+    """Render one bounded page of a file diff."""
+    lines = unified_diff.splitlines() or ["(no textual changes)"]
+    total_pages = max(1, (len(lines) + page_size - 1) // page_size)
+    normalized_page = min(max(page, 1), total_pages)
+    start = (normalized_page - 1) * page_size
+    body = "\n".join(lines[start : start + page_size])
+    print_cli_output(
+        body,
+        title=f"Diff · {file_path} · page {normalized_page}/{total_pages}",
+        style="cyan",
+    )
+    return normalized_page, total_pages
+
+
+def print_chat_history(conversations: list[object], *, limit: int = 5) -> None:
+    """Show recent chats at startup without treating one as implicitly resumed."""
+    recent = [conv for conv in conversations if getattr(conv, "turn_count", 0) > 0][
+        :limit
+    ]
+    if not recent:
+        console.print(
+            _panel(
+                "Chat History",
+                "No previous chats yet. This session starts a new conversation.",
+                style="cyan",
+            )
+        )
+        console.print()
+        return
+
+    table = Table.grid(padding=(0, 2))
+    table.add_column("#", style="bold yellow", justify="right", no_wrap=True)
+    table.add_column("ID", style="cyan", no_wrap=True)
+    table.add_column("Title", style="bold white", overflow="ellipsis", max_width=42)
+    table.add_column("Turns", style="dim", justify="right", no_wrap=True)
+    table.add_column("Last active", style="dim", no_wrap=True)
+    table.add_row("#", "ID", "Previous chat", "Turns", "Last active")
+    for index, conv in enumerate(recent, 1):
+        title = str(getattr(conv, "title", "Conversation"))
+        table.add_row(
+            str(index),
+            _short_id(str(getattr(conv, "id", ""))),
+            title,
+            str(getattr(conv, "turn_count", 0)),
+            _fmt_dt(str(getattr(conv, "updated_at", ""))),
+        )
+    table.add_row("", "", "", "", "")
+    table.add_row("", "Resume", "/chat switch <# or ID>", "", "")
+    console.print(_panel("Chat History", table, style="cyan"))
     console.print()
 
 
@@ -731,7 +882,7 @@ _HELP_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
         ("/exit",                "End the interactive session"),
     ]),
     ("Chat", [
-        ("pulse",                "Start interactive chat (restores last conversation)"),
+        ("pulse",                "Start a fresh interactive chat"),
         ('pulse ask "..."',      "Single-shot question"),
     ]),
     ("Conversations", [
@@ -750,6 +901,7 @@ _HELP_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
     ]),
     ("Git", [
         ("pulse git",                  "Branch status, diff, commit suggestion"),
+        ("pulse diff [FILE_OR_#]",     "Review latest Pulse edits page by page"),
         ("pulse mutations [--last]",   "Show tracked file mutations"),
         ("pulse rollback",             "Restore latest approved edit"),
         ("pulse edit FILE CONTENT",    "Propose and approve a file change"),

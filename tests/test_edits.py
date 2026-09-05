@@ -57,3 +57,37 @@ def test_rollback_restores_last_approved_edit(tmp_path: Path) -> None:
 
     assert asyncio.run(flow.rollback_last()) is True
     assert target.read_text(encoding="utf-8") == "before\n"
+
+
+def test_sync_approval_handler_is_supported(tmp_path: Path) -> None:
+    target = tmp_path / "note.txt"
+    target.write_text("before\n", encoding="utf-8")
+
+    result = asyncio.run(
+        workflow(tmp_path).request_and_apply(
+            "note.txt", "after\n", "update note", lambda _proposal: True
+        )
+    )
+
+    assert result.applied is True
+
+
+def test_approved_edit_batch_is_grouped_for_review_and_rollback(tmp_path: Path) -> None:
+    flow = workflow(tmp_path)
+    asyncio.run(
+        flow.request_and_apply(
+            "one.txt", "one\n", "create one", approve, batch_id="request-1"
+        )
+    )
+    asyncio.run(
+        flow.request_and_apply(
+            "two.txt", "two\n", "create two", approve, batch_id="request-1"
+        )
+    )
+
+    batch = flow.sandbox.mutations.last_approved_edit()
+
+    assert [event["file_path"] for event in batch] == ["one.txt", "two.txt"]
+    assert asyncio.run(flow.rollback_last()) is True
+    assert not (tmp_path / "one.txt").exists()
+    assert not (tmp_path / "two.txt").exists()

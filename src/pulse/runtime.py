@@ -122,6 +122,10 @@ def build_runtime(workspace: Path, config: AgentConfig | None = None) -> AgentRu
     )
 
     async def check_permission(invocation: ToolInvocation, tool: object) -> bool:
+        if invocation.name == "edit" and invocation.metadata.get(
+            "detailed_edit_approval"
+        ):
+            return True
         return sandbox.request_project_action(
             "run tool", getattr(tool, "name", "tool"), "This action changes the project."
         )

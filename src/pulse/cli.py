@@ -3,8 +3,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import getpass
-import io
 import json
+import os
 import shutil
 import sys
 import warnings
@@ -44,14 +44,17 @@ from .cli_ui import (
     print_all_models_list,
     print_auth_prompt,
     print_banner,
-    print_chat_card,
     print_chat_created,
     print_chat_exported,
+    print_chat_history,
     print_chat_list,
     print_chat_search_results,
     print_chat_switched,
     print_cli_output,
     print_current_model_card,
+    print_diff_page,
+    print_edit_proposal_summary,
+    print_edit_summary,
     print_error,
     print_help_screen,
     print_info,
@@ -62,7 +65,6 @@ from .cli_ui import (
     print_signed_in,
     print_status_cards,
     print_success,
-    print_verification,
     print_warning,
     task_spinner,
     thinking_spinner,
@@ -143,6 +145,13 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     mutations_parser = subparsers.add_parser("mutations", help="Show tracked repository mutations.")
     mutations_parser.add_argument("--last", action="store_true", help="Show only the latest transaction.")
+    diff_parser = subparsers.add_parser(
+        "diff", help="Review the latest Pulse edit batch without flooding the terminal."
+    )
+    diff_parser.add_argument(
+        "file", nargs="?", default=None, help="File path or number from the diff summary."
+    )
+    diff_parser.add_argument("--page", type=int, default=1, help="Summary or diff page.")
     edit_parser = subparsers.add_parser("edit", help="Propose a file replacement and request approval.")
     edit_parser.add_argument("file")
     edit_parser.add_argument("content")
@@ -269,6 +278,8 @@ def _run_main(argv: list[str] | None = None) -> None:
                 print_info("Authentication required. Please login first.")
                 return
             print_cli_output(asyncio.run(runtime.tools.execute(ToolInvocation(name="mutations", arguments={"last": args.last}))).content, title="Mutations")
+        elif args.command == "diff":
+            _show_latest_diff(runtime.mutations, args.file, args.page)
         elif args.command == "edit":
             if not is_authenticated():
                 print_info("Authentication required. Please login first.")
@@ -852,10 +863,63 @@ def _show_whoami() -> None:
 
 
 def approve_in_cli(proposal: EditProposal) -> bool:
-    verification_msg = f"Proposed edit: {proposal.file_path}\n{proposal.unified_diff or '(no changes)'}"
-    print_verification(verification_msg)
-    answer = input("Apply this edit? [y/N] ").strip().lower()
-    return answer in {"y", "yes"}
+    """Request approval from a compact proposal, with opt-in paginated review."""
+    print_edit_proposal_summary(proposal)
+    while True:
+        answer = input("Apply this edit? [y/N/V review] ").strip().lower()
+        if answer in {"y", "yes"}:
+            return True
+        if answer not in {"v", "view", "review"}:
+            return False
+        _review_diff_interactively(proposal.file_path, proposal.unified_diff)
+
+
+def _review_diff_interactively(file_path: str, unified_diff: str) -> None:
+    page = 1
+    while True:
+        page, total_pages = print_diff_page(file_path, unified_diff, page=page)
+        if total_pages == 1:
+            return
+        action = input("Diff [N next/P previous/Q close]: ").strip().lower()
+        if action in {"q", "quit", "close", ""}:
+            return
+        if action in {"n", "next"}:
+            page = min(page + 1, total_pages)
+        elif action in {"p", "previous", "prev"}:
+            page = max(page - 1, 1)
+
+
+def _show_latest_diff(mutations, selector: str | None, page: int) -> None:
+    changes = mutations.last_approved_edit()
+    if not changes:
+        print_info("No approved Pulse edits are available for review.")
+        return
+    if selector is None:
+        print_edit_summary(changes, page=page, title="Latest Pulse edits")
+        return
+
+    selected = None
+    if selector.isdigit():
+        index = int(selector) - 1
+        if 0 <= index < len(changes):
+            selected = changes[index]
+    else:
+        matches = [
+            change
+            for change in changes
+            if str(change.get("file_path", "")) == selector
+            or str(change.get("file_path", "")).startswith(selector)
+        ]
+        if len(matches) == 1:
+            selected = matches[0]
+    if selected is None:
+        print_error(f"No unique edited file matches {selector!r}.")
+        return
+    print_diff_page(
+        str(selected.get("file_path", "unknown file")),
+        str(selected.get("unified_diff", "")),
+        page=page,
+    )
 
 
 def print_doctor(
@@ -892,12 +956,18 @@ def print_doctor(
         return report.passed
 
     api_key_env_var = getattr(provider, "api_key_env_var", "Provider API key")
+    source_checkout = workspace / "src" / "pulse" / "cli.py"
+    running_checkout = (
+        not source_checkout.exists()
+        or source_checkout.resolve() == Path(__file__).resolve()
+    )
     checks = [
         ("Workspace", str(workspace), workspace.exists()),
         ("agent.config.json", str(workspace / "agent.config.json"), (workspace / "agent.config.json").exists()),
         ("Provider key", api_key_env_var, provider.is_configured),
         ("uv command", shutil.which("uv") or "not on PATH", shutil.which("uv") is not None),
         ("pulse command", shutil.which("pulse") or "not on PATH", shutil.which("pulse") is not None),
+        ("Loaded Pulse source", str(Path(__file__).resolve()), running_checkout),
         ("Single model mode", config.mode, config.mode == "single-model"),
         ("Configured provider", config.model.provider, bool(config.model.provider)),
         ("Configured model", config.model.name, bool(config.model.name)),
@@ -1032,6 +1102,18 @@ def _handle_chat_command(workspace: Path, args: object) -> None:
 def _resolve_conversation(cm: ConversationManager, id_prefix: str):
     """Resolve a conversation by full ID or unique prefix. Returns None on failure."""
     all_convs = cm.list_all()
+    if id_prefix.isdigit():
+        active = cm.get_active()
+        history = [
+            conv
+            for conv in all_convs
+            if conv.turn_count > 0 and (active is None or conv.id != active.id)
+        ]
+        index = int(id_prefix) - 1
+        if 0 <= index < len(history):
+            return history[index]
+        print_error(f"No previous conversation exists at position {id_prefix}.")
+        return None
     matches = [c for c in all_convs if c.id == id_prefix or c.id.startswith(id_prefix)]
     if not matches:
         print_error(f"No conversation found matching ID prefix: {id_prefix!r}")
@@ -1051,22 +1133,25 @@ def _handle_interactive_mode(auth, agent, runtime=None) -> None:
     workspace = Path.cwd()
     cm = ConversationManager(workspace)
     prompt = InteractivePrompt(workspace, _build_parser())
+    _warn_if_checkout_is_not_active(workspace)
 
-    # Restore last active conversation or create a fresh one
-    active_conv = cm.get_active()
-    if active_conv is None:
-        active_conv = cm.create()
-    is_first_message = active_conv.turn_count == 0
+    # A plain `pulse` launch always begins a fresh chat. Previous chats remain
+    # available explicitly through `/chat switch <ID>`.
+    previous_conversations = cm.list_all()
+    active_conv = cm.create()
+    is_first_message = True
+    resume_history: list[tuple[str, str]] = []
 
     print_banner()
     if not is_authenticated():
-        print_auth_prompt()
-        answer = input("Sign in now with Google? [Y/n] ").strip().lower()
-        if answer not in {"n", "no"}:
+        auth_choice = print_auth_prompt()
+        if auth_choice == "1":
             if _handle_login_command():
                 _run_provider_onboarding(workspace)
                 runtime = build_runtime(workspace)
                 agent = runtime.agent
+        elif auth_choice == "3":
+            return
         else:
             print_info("Continuing unauthenticated.")
     else:
@@ -1080,13 +1165,12 @@ def _handle_interactive_mode(auth, agent, runtime=None) -> None:
                 runtime = build_runtime(workspace)
                 agent = runtime.agent
 
-    # Show active conversation info
-    print_chat_card(active_conv)
+    print_chat_history(previous_conversations)
     print_info("Type / to open the command menu, or /help to see every command.")
 
     while True:
         try:
-            user_input = prompt.read(active_conv.title)
+            user_input = prompt.read()
             if not user_input:
                 continue
             normalized = user_input.lower()
@@ -1117,9 +1201,19 @@ def _handle_interactive_mode(auth, agent, runtime=None) -> None:
                         print_warning(f"Command finished with exit code {error.code}.")
 
                 refreshed = cm.get_active()
+                if command_args[0] == "chat" and refreshed is None:
+                    refreshed = cm.create()
                 if refreshed is not None:
+                    changed_conversation = refreshed.id != active_conv.id
                     active_conv = refreshed
                     is_first_message = active_conv.turn_count == 0
+                    if changed_conversation:
+                        runtime = build_runtime(workspace)
+                        agent = runtime.agent
+                        resume_history = [
+                            (turn.role, turn.content)
+                            for turn in cm.get_turns(active_conv.id)
+                        ]
 
                 # Model and key changes must take effect on the very next prompt.
                 if command_args[0] in {"model", "keys"}:
@@ -1127,21 +1221,38 @@ def _handle_interactive_mode(auth, agent, runtime=None) -> None:
                     agent = runtime.agent
                 continue
 
-            # Capture stdout to record the assistant response
-            captured = io.StringIO()
-            real_stdout = sys.stdout
-            sys.stdout = captured
             interrupted = False
+            output = ""
             try:
-                with thinking_spinner():
-                    agent.ask(user_input, auto_approve_reads=True)
+                if agent.should_create_workspace_files(user_input):
+                    with thinking_spinner():
+                        files = agent.plan_workspace_files(
+                            user_input,
+                            conversation_history=resume_history,
+                        )
+                    applied = agent.apply_workspace_files(files, approve_in_cli)
+                    if applied:
+                        output = f"Edited {len(applied)} file{'s' if len(applied) != 1 else ''}."
+                        print_edit_summary(applied)
+                    else:
+                        output = "No files were created because the proposed edits were declined."
+                        print_warning(output)
+                else:
+                    with thinking_spinner():
+                        output = (
+                            agent.ask(
+                                user_input,
+                                auto_approve_reads=True,
+                                conversation_id=active_conv.id,
+                                conversation_history=resume_history,
+                            )
+                            or ""
+                        )
+                resume_history = []
             except KeyboardInterrupt:
                 interrupted = True
-            finally:
-                sys.stdout = real_stdout
-                output = captured.getvalue()
-                # Print to real stdout so user sees the answer
-                print(output, end="")
+            except (RuntimeError, TypeError, ValueError) as error:
+                print_error(str(error))
 
             if interrupted:
                 print_warning("Request cancelled. Your session is still active.")
@@ -1167,6 +1278,20 @@ def _handle_interactive_mode(auth, agent, runtime=None) -> None:
             break
 
 
+def _warn_if_checkout_is_not_active(workspace: Path) -> bool:
+    """Warn when a global executable shadows the source checkout being tested."""
+    checkout_cli = workspace / "src" / "pulse" / "cli.py"
+    if not checkout_cli.exists() or checkout_cli.resolve() == Path(__file__).resolve():
+        return False
+    local_executable = workspace / ".venv" / "Scripts" / "pulse.exe"
+    print_warning(
+        "This pulse command is not running the current source checkout. "
+        f"Loaded {Path(__file__).resolve()}. Use `{local_executable}` or `uv run pulse` "
+        "to test local changes."
+    )
+    return True
+
+
 def main(argv: list[str] | None = None) -> None:
     try:
         _run_main(argv)
@@ -1175,10 +1300,17 @@ def main(argv: list[str] | None = None) -> None:
     except KeyboardInterrupt:
         print_warning("Command cancelled.")
         raise SystemExit(130) from None
+    except AuthError as error:
+        print_error(f"Authentication failed: {error}")
+        raise SystemExit(1) from None
     except (EOFError, OSError, RuntimeError, ValueError, json.JSONDecodeError):
+        if os.environ.get("PULSE_DEBUG") == "1":
+            raise
         print_error("Pulse could not complete the request. Check configuration and inputs.")
         raise SystemExit(1) from None
-    except Exception:  # noqa: BLE001
+    except Exception:
+        if os.environ.get("PULSE_DEBUG") == "1":
+            raise
         print_error("Pulse could not complete the request. Check configuration and inputs.")
         raise SystemExit(1) from None
 

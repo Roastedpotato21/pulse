@@ -172,6 +172,18 @@ class TestGetActive:
         assert active is not None
         assert active.id == conv.id
 
+    def test_creating_a_chat_for_a_new_cli_launch_does_not_delete_history(
+        self, cm: ConversationManager
+    ) -> None:
+        previous = cm.create(title="Previous chat")
+        cm.add_turn(previous.id, "user", "Remember this")
+
+        fresh = cm.create()
+
+        assert cm.get_active() == fresh
+        assert fresh.turn_count == 0
+        assert any(conv.id == previous.id for conv in cm.list_all())
+
 
 class TestTurns:
     def test_add_and_get_turns(self, cm: ConversationManager) -> None:

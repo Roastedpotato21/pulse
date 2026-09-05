@@ -150,10 +150,17 @@ class MutationTracker:
         return [event for event in events if event.get("transaction_id") == last_id]
 
     def last_approved_edit(self) -> list[dict[str, object]]:
-        """Return the latest approved-edit transaction, excluding rollback logs."""
-        events = [event for event in self.history() if event.get("command") == "pulse approved edit"]
+        """Return the latest approved edit batch, excluding rollback logs."""
+        events = [
+            event
+            for event in self.history()
+            if str(event.get("command", "")).startswith("pulse approved edit")
+        ]
         if not events:
             return []
+        command = str(events[-1].get("command", ""))
+        if ":" in command:
+            return [event for event in events if event.get("command") == command]
         transaction_id = events[-1].get("transaction_id")
         return [event for event in events if event.get("transaction_id") == transaction_id]
 

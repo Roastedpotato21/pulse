@@ -189,6 +189,7 @@ class SecureTokenStore:
             os.path.normcase(str(self.workspace)).encode("utf-8")
         ).hexdigest()[:24]
         self.account_name = f"{KEYRING_ACCOUNT_NAME}:{digest}"
+        self.oauth_config_account = f"{self.account_name}:oauth-client"
 
     def _field_account(self, field: str, index: int) -> str:
         return f"{self.account_name}:{field}:{index}"
@@ -372,6 +373,54 @@ class SecureTokenStore:
         except (json.JSONDecodeError, TypeError, KeyError, ValueError):
             return None
 
+    def store_oauth_config(self, config: dict[str, str]) -> None:
+        """Persist the desktop-client identity needed for later token refresh."""
+        if keyring is None:
+            raise AuthError("The OS credential vault is unavailable; sign-in cannot persist.")
+        payload = json.dumps(
+            {
+                "client_id": config["client_id"],
+                "client_secret": config["client_secret"],
+                "redirect_uri": config["redirect_uri"],
+            },
+            separators=(",", ":"),
+        )
+        try:
+            keyring.set_password(KEYRING_SERVICE_NAME, self.oauth_config_account, payload)
+            persisted = keyring.get_password(
+                KEYRING_SERVICE_NAME, self.oauth_config_account
+            )
+        except Exception as error:
+            raise AuthError(
+                "The OS credential vault rejected the OAuth client configuration."
+            ) from error
+        if not persisted or not hmac.compare_digest(persisted, payload):
+            raise AuthError(
+                "The OS credential vault did not confirm the OAuth client configuration."
+            )
+
+    def load_oauth_config(self) -> dict[str, str] | None:
+        """Load and validate the desktop-client identity saved during sign-in."""
+        if keyring is None:
+            return None
+        try:
+            payload = keyring.get_password(
+                KEYRING_SERVICE_NAME, self.oauth_config_account
+            )
+            if not payload:
+                return None
+            parsed = json.loads(payload)
+            if not isinstance(parsed, dict):
+                return None
+            return _validate_google_config(
+                {str(key): str(value) for key, value in parsed.items()}
+            )
+        except (AuthConfigurationError, json.JSONDecodeError, TypeError, ValueError):
+            return None
+        except Exception:  # noqa: BLE001 - a locked vault means no saved config
+            logger.debug("OS credential vault OAuth configuration load failed.")
+            return None
+
     def clear_session(self) -> None:
         if keyring is not None:
             accounts: set[str] = set()
@@ -380,7 +429,7 @@ class SecureTokenStore:
                 accounts = self._manifest_accounts(manifest)
             except Exception:  # noqa: BLE001
                 logger.debug("OS credential vault clear was unavailable.")
-            for account in {self.account_name} | accounts:
+            for account in {self.account_name, self.oauth_config_account} | accounts:
                 try:
                     keyring.delete_password(KEYRING_SERVICE_NAME, account)
                 except Exception:  # noqa: BLE001
@@ -766,19 +815,10 @@ def _validated_redirect_uri(value: str) -> str:
     return value
 
 
-def get_google_config() -> dict[str, str]:
-    """Resolve the product-owned public OAuth identity without reading workspace files."""
-    packaged = _packaged_google_config()
-    client_id = os.environ.get(PRODUCT_CLIENT_ID_ENV, "").strip() or packaged.get(
-        "client_id", ""
-    )
-    client_secret = os.environ.get(PRODUCT_CLIENT_SECRET_ENV, "").strip() or packaged.get(
-        "client_secret", ""
-    )
-    redirect_uri = os.environ.get(PRODUCT_REDIRECT_URI_ENV, "").strip() or packaged.get(
-        "redirect_uri", DEFAULT_REDIRECT_URI
-    )
-
+def _validate_google_config(config: dict[str, str]) -> dict[str, str]:
+    client_id = config.get("client_id", "").strip()
+    client_secret = config.get("client_secret", "").strip()
+    redirect_uri = config.get("redirect_uri", DEFAULT_REDIRECT_URI).strip()
     if (
         client_id.lower() in _UNCONFIGURED_CLIENT_IDS
         or not _GOOGLE_CLIENT_ID.fullmatch(client_id)
@@ -796,6 +836,21 @@ def get_google_config() -> dict[str, str]:
         "client_secret": client_secret,
         "redirect_uri": _validated_redirect_uri(redirect_uri or DEFAULT_REDIRECT_URI),
     }
+
+
+def get_google_config() -> dict[str, str]:
+    """Resolve the product-owned public OAuth identity without reading workspace files."""
+    packaged = _packaged_google_config()
+    return _validate_google_config(
+        {
+            "client_id": os.environ.get(PRODUCT_CLIENT_ID_ENV, "").strip()
+            or packaged.get("client_id", ""),
+            "client_secret": os.environ.get(PRODUCT_CLIENT_SECRET_ENV, "").strip()
+            or packaged.get("client_secret", ""),
+            "redirect_uri": os.environ.get(PRODUCT_REDIRECT_URI_ENV, "").strip()
+            or packaged.get("redirect_uri", DEFAULT_REDIRECT_URI),
+        }
+    )
 
 
 def build_authorization_url(
@@ -946,6 +1001,13 @@ class AuthenticationManager:
 
         _, tokens = session
         if not tokens.is_expired:
+            if _token_store.load_oauth_config() is None:
+                try:
+                    _token_store.store_oauth_config(get_google_config())
+                except AuthError:
+                    # A valid access token remains usable even when an older
+                    # installation cannot migrate its refresh configuration.
+                    logger.debug("OAuth refresh configuration migration was unavailable.")
             return True
 
         return self.refresh_google_token()
@@ -989,7 +1051,13 @@ class AuthenticationManager:
         if not tokens.refresh_token:
             return False
 
-        config = get_google_config()
+        try:
+            config = get_google_config()
+        except AuthConfigurationError:
+            stored_config = _token_store.load_oauth_config()
+            if stored_config is None:
+                return False
+            config = stored_config
         data = urllib.parse.urlencode({
             "client_id": config["client_id"],
             "client_secret": config["client_secret"],
@@ -1147,5 +1215,13 @@ def login(timeout_seconds: int = 120) -> UserProfile | None:
         code_verifier,
         config=flow_config,
     )
-    _token_store.store_session(user_profile, tokens)
+    # Source installs may receive the desktop-client identity through temporary
+    # environment variables. Save it beside the session in the OS vault so a
+    # later process can refresh the token without those variables.
+    _token_store.store_oauth_config(config)
+    try:
+        _token_store.store_session(user_profile, tokens)
+    except AuthError:
+        _token_store.clear_session()
+        raise
     return user_profile

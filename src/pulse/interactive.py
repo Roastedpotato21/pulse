@@ -29,7 +29,6 @@ _ROOT_COMMAND_PRIORITY = ("help", "status", "model", "keys", "clear", "exit")
 _STYLE = Style.from_dict(
     {
         "prompt": "bold ansicyan",
-        "conversation": "ansibrightblack",
         "bottom-toolbar": "bg:#20242b #aeb6c2",
         "completion-menu.completion": "bg:#20242b #d7dae0",
         "completion-menu.completion.current": "bg:#146b8c #ffffff bold",
@@ -205,13 +204,14 @@ class InteractivePrompt:
             output=output,
         )
 
-    def read(self, conversation: str) -> str:
-        label = conversation[:28]
+    def read(self, conversation: str | None = None) -> str:
+        # Retain the optional argument for callers using the older API, but do
+        # not repeat potentially long conversation titles in every prompt.
+        del conversation
         return self.session.prompt(
             FormattedText(
                 [
                     ("class:prompt", "pulse"),
-                    ("class:conversation", f" [{label}]"),
                     ("", "> "),
                 ]
             )
