@@ -177,7 +177,7 @@ def test_successful_login_onboards_provider_model_and_hidden_key(
     from pulse.auth import UserProfile
 
     secret = "synthetic-onboarding-key"
-    answers = iter(["3", "2"])
+    answers = iter(["3"])
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli, "is_authenticated", lambda: False)
     monkeypatch.setattr(
@@ -187,6 +187,11 @@ def test_successful_login_onboards_provider_model_and_hidden_key(
     )
     monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
     monkeypatch.setattr(cli.getpass, "getpass", lambda _prompt: secret)
+    monkeypatch.setattr(
+        cli.ProviderManager,
+        "resolve_auto_model",
+        lambda self, provider, api_key, persist=False: "gpt-5.6-terra",
+    )
     monkeypatch.setattr(sys, "argv", ["pulse", "login"])
 
     cli.main()
@@ -194,7 +199,8 @@ def test_successful_login_onboards_provider_model_and_hidden_key(
     selection = (tmp_path / ".agent" / "provider.json").read_text(encoding="utf-8")
     output = capsys.readouterr().out
     assert '"provider": "openai"' in selection
-    assert '"model": "gpt-4o-mini"' in selection
+    assert '"model": "gpt-5.6-terra"' in selection
+    assert '"selection_mode": "auto"' in selection
     assert "BYOK setup complete" in output
     assert secret not in output
     assert secret in memory_provider_keyring.credentials.values()

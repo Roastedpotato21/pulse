@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from pulse import __version__
-from pulse.config import load_agent_config
 from pulse.runtime import build_runtime
 from pulse.telemetry import get_correlation_id, set_correlation_id
 from pulse.tool_registry import ToolInvocation
@@ -194,7 +193,7 @@ async def serve(
         raise RuntimeError("WebSocket support requires the 'websockets' package. Run `uv sync`.") from error
 
     workspace_path = Path(workspace).resolve()
-    runtime = build_runtime(workspace_path, load_agent_config(workspace_path))
+    runtime = build_runtime(workspace_path)
     dispatcher = JsonRpcDispatcher(runtime)
 
     async def handler(websocket: Any) -> None:

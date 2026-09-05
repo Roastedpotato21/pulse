@@ -38,7 +38,7 @@ def test_save_and_get_active_selection(temp_workspace: Path) -> None:
     # Initial default selection
     prov, model = pm.get_active_selection()
     assert prov == "openrouter"
-    assert model == "qwen/qwen3-coder:free"
+    assert model == "cohere/north-mini-code:free"
 
     # Save selection
     saved_p, saved_m = pm.save_selection("gemini", "gemini-3.8-flash")
@@ -50,9 +50,10 @@ def test_save_and_get_active_selection(temp_workspace: Path) -> None:
     assert json_path.exists()
     data = json.loads(json_path.read_text(encoding="utf-8"))
     assert data == {
-        "schema_version": 1,
+        "schema_version": 2,
         "provider": "gemini",
         "model": "gemini-3.8-flash",
+        "selection_mode": "manual",
     }
 
     # Read back active selection
@@ -63,9 +64,9 @@ def test_save_and_get_active_selection(temp_workspace: Path) -> None:
 
 def test_model_metadata_lookup(temp_workspace: Path) -> None:
     pm = ProviderManager(temp_workspace)
-    meta = pm.get_model_metadata("anthropic", "claude-3-5-sonnet-20241022")
+    meta = pm.get_model_metadata("anthropic", "claude-sonnet-4-6")
     assert meta is not None
-    assert meta.name == "claude-3-5-sonnet-20241022"
+    assert meta.name == "claude-sonnet-4-6"
     assert meta.speed == "High Quality"
     assert meta.context_length == "200k"
     assert "Coding" in meta.best_for
@@ -75,7 +76,7 @@ def test_validate_active_selection(temp_workspace: Path) -> None:
     pm = ProviderManager(temp_workspace)
     prov, model, warning = pm.validate_active_selection()
     assert prov == "openrouter"
-    assert model == "qwen/qwen3-coder:free"
+    assert model == "cohere/north-mini-code:free"
     assert warning is None
 
 
@@ -92,6 +93,23 @@ def test_validate_active_selection_migrates_retired_gemini_model(
     assert warning is not None
     assert "retired" in warning
     assert pm.get_active_selection() == ("gemini", "gemini-3.6-flash")
+
+
+def test_legacy_selection_is_loaded_as_manual(temp_workspace: Path) -> None:
+    config_file = temp_workspace / ".agent" / "provider.json"
+    config_file.parent.mkdir(parents=True)
+    config_file.write_text(
+        json.dumps(
+            {"schema_version": 1, "provider": "openai", "model": "custom-model"}
+        ),
+        encoding="utf-8",
+    )
+
+    selection = ProviderManager(temp_workspace).get_selection()
+
+    assert selection.provider == "openai"
+    assert selection.model == "custom-model"
+    assert selection.selection_mode == "manual"
 
 
 def test_api_key_detection(temp_workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -144,11 +162,11 @@ def test_provider_factory_compatibility(temp_workspace: Path) -> None:
 
     providers_to_test = [
         ("gemini", GeminiProvider, "gemini-3.6-flash"),
-        ("openrouter", OpenRouterProvider, "qwen/qwen3-coder:free"),
-        ("openai", OpenAIProvider, "gpt-4o"),
-        ("anthropic", AnthropicProvider, "claude-3-5-sonnet-20241022"),
-        ("groq", GroqProvider, "llama-3.3-70b-versatile"),
-        ("deepseek", DeepSeekProvider, "deepseek-chat"),
+        ("openrouter", OpenRouterProvider, "cohere/north-mini-code:free"),
+        ("openai", OpenAIProvider, "gpt-5.6-terra"),
+        ("anthropic", AnthropicProvider, "claude-sonnet-4-6"),
+        ("groq", GroqProvider, "openai/gpt-oss-120b"),
+        ("deepseek", DeepSeekProvider, "deepseek-v4-flash"),
     ]
 
     for key, cls, model_name in providers_to_test:

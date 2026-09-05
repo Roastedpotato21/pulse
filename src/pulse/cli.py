@@ -31,6 +31,10 @@ from pulse.conversations import ConversationManager
 from pulse.edits import EditProposal
 from pulse.interactive import InteractivePrompt, parse_slash_command
 from pulse.provider_keys import ProviderKeyError, ProviderKeyStore
+from pulse.providers.discovery import (
+    ModelDiscoveryError,
+    detect_provider_candidates,
+)
 from pulse.providers.manager import ProviderManager
 from pulse.runtime import build_runtime
 from pulse.telemetry import set_correlation_id
@@ -240,7 +244,7 @@ def _run_main(argv: list[str] | None = None) -> None:
         asyncio.run(serve(str(workspace), args.host, args.port))
         return
 
-    runtime = build_runtime(workspace, config)
+    runtime = build_runtime(workspace)
 
     try:
         if args.command == "ask":
@@ -383,6 +387,27 @@ def _handle_model_command(
             spec.env_var,
             providers_status.get(active_prov, False),
         )
+        print_info(f"Selection mode: {pm.get_selection_mode()}")
+        return
+
+    # Automatic account-aware selection: pulse model auto [provider]
+    if provider_arg and provider_arg.lower() == "auto":
+        active_provider, _ = pm.get_active_selection()
+        provider = model_arg or active_provider
+        try:
+            spec = pm.get_provider_spec(provider)
+            api_key = ProviderKeyStore(workspace).get(spec.key)
+            if not api_key:
+                print_error(
+                    f"No {spec.display_name} key is configured. Run 'pulse keys set {spec.key}'."
+                )
+                raise SystemExit(2)
+            model = pm.resolve_auto_model(spec.key, api_key)
+        except (ValueError, ModelDiscoveryError) as error:
+            print_error(str(error))
+            raise SystemExit(2) from error
+        print_provider_changed_card(spec.display_name, model, spec.env_var, True)
+        print_success("Automatic model selection is enabled for this provider.")
         return
 
     # Subcommand: pulse model list
@@ -407,7 +432,7 @@ def _handle_model_command(
             print_all_models_list(providers, active_prov, active_mod)
         return
 
-    # Direct provider setting: pulse model openrouter [qwen/qwen3-coder:free]
+    # Direct provider setting: pulse model openrouter [model identifier]
     if provider_arg:
         try:
             spec = pm.get_provider_spec(provider_arg)
@@ -515,6 +540,30 @@ def _prompt_provider_and_model(pm: ProviderManager) -> tuple[str, str] | None:
     return chosen_key, chosen_model
 
 
+def _prompt_provider_only(pm: ProviderManager) -> str | None:
+    active_provider, _, warning = pm.validate_active_selection()
+    if warning:
+        print_warning(warning)
+    providers = pm.list_providers()
+    print_provider_selection(providers, active_provider)
+    try:
+        choice = input(
+            "Select provider number or key [Enter keeps active]: "
+        ).strip().lower()
+    except (KeyboardInterrupt, EOFError):
+        print("\nCancelled provider selection.")
+        return None
+    if not choice:
+        return active_provider
+    if choice.isdigit() and 1 <= int(choice) <= len(providers):
+        return str(providers[int(choice) - 1]["key"])
+    try:
+        return pm.get_provider_spec(choice).key
+    except ValueError as error:
+        print_error(str(error))
+        return None
+
+
 def _handle_login_command() -> bool:
     """Handle `pulse login` experience."""
     if is_authenticated():
@@ -551,27 +600,72 @@ def _handle_login_command() -> bool:
 
 
 def _run_provider_onboarding(workspace: Path) -> bool:
-    """Connect a provider/model/key immediately after successful login."""
-    print_info("Authentication complete. Connect your BYOK model provider.")
+    """Connect a provider key and automatically select an available model."""
+    print_info("Authentication complete. Connect your BYOK provider key.")
     manager = ProviderManager(workspace)
-    selection = _prompt_provider_and_model(manager)
-    if selection is None:
-        print_warning("Provider setup skipped. Run /keys or /model at any time.")
-        return False
-
-    provider, model = selection
     store = ProviderKeyStore(workspace)
-    status = next(item for item in store.statuses() if item.provider == provider)
-    if status.configured:
-        print_info(
-            f"Using the existing {provider} credential from {status.source}."
-        )
-    elif not _prompt_and_store_provider_key(store, provider, rotating=False):
-        print_warning("Provider setup was not saved because no key was stored.")
+    configured = [status for status in store.statuses() if status.configured]
+
+    api_key: str | None
+    if configured:
+        provider = _prompt_provider_only(manager)
+        if provider is None:
+            print_warning("Provider setup skipped. Run /keys or /model at any time.")
+            return False
+        api_key = store.get(provider)
+        if api_key:
+            print_info(f"Using the existing {provider} credential.")
+        else:
+            api_key = _read_hidden_provider_key(provider)
+    else:
+        api_key = _read_hidden_provider_key("provider")
+        if not api_key:
+            print_warning("Provider setup skipped because no key was entered.")
+            return False
+        candidates = detect_provider_candidates(api_key)
+        if len(candidates) == 1:
+            provider = candidates[0]
+            print_info(
+                f"Detected {manager.get_provider_spec(provider).display_name} from the key format."
+            )
+        else:
+            if candidates:
+                print_info(
+                    "This key format is shared by multiple providers; choose where it was created."
+                )
+            else:
+                print_info("Choose the provider that issued this key.")
+            provider = _prompt_provider_only(manager)
+            if provider is None:
+                return False
+
+    if not api_key:
+        print_warning("Provider setup was not saved because no key was entered.")
         return False
 
-    saved_provider, saved_model = manager.save_selection(provider, model)
-    spec = manager.get_provider_spec(saved_provider)
+    spec = manager.get_provider_spec(provider)
+    try:
+        model = manager.resolve_auto_model(provider, api_key, persist=False)
+    except ModelDiscoveryError as error:
+        if error.status_code in {401, 403}:
+            print_error(str(error))
+            print_warning("The key and provider selection were not saved.")
+            return False
+        model = spec.default_model
+        print_warning(
+            f"Live model discovery is unavailable; using {model} and retrying discovery if it is retired."
+        )
+
+    if not store.get(provider):
+        try:
+            variable = store.set(provider, api_key)
+        except ProviderKeyError as error:
+            print_error(str(error))
+            return False
+        print_success(f"Stored {variable} in the OS credential vault.")
+    _, saved_model = manager.save_selection(
+        provider, model, selection_mode="auto"
+    )
     print_provider_changed_card(
         spec.display_name,
         saved_model,
@@ -620,6 +714,22 @@ def _prompt_and_store_provider_key(
     action = "Rotated" if rotating else "Stored"
     print_success(f"{action} {variable} in the OS credential vault.")
     return True
+
+
+def _refresh_auto_selection(workspace: Path, provider: str) -> None:
+    manager = ProviderManager(workspace)
+    selection = manager.get_selection()
+    if selection.selection_mode != "auto" or selection.provider != provider:
+        return
+    api_key = ProviderKeyStore(workspace).get(provider)
+    if not api_key:
+        return
+    try:
+        model = manager.resolve_auto_model(provider, api_key)
+    except ModelDiscoveryError as error:
+        print_warning(f"The key was saved, but automatic model refresh failed: {error}")
+        return
+    print_info(f"Automatic model selection resolved to {model}.")
 
 
 def _print_provider_key_statuses(store: ProviderKeyStore) -> None:
@@ -709,6 +819,7 @@ def _handle_keys_command(workspace: Path, args: object) -> None:
             )
             if not stored:
                 raise SystemExit(2)
+            _refresh_auto_selection(workspace, provider)
             return
 
         if command == "remove":
@@ -954,7 +1065,7 @@ def _handle_interactive_mode(auth, agent, runtime=None) -> None:
         if answer not in {"n", "no"}:
             if _handle_login_command():
                 _run_provider_onboarding(workspace)
-                runtime = build_runtime(workspace, load_agent_config(workspace))
+                runtime = build_runtime(workspace)
                 agent = runtime.agent
         else:
             print_info("Continuing unauthenticated.")
@@ -966,7 +1077,7 @@ def _handle_interactive_mode(auth, agent, runtime=None) -> None:
             print_warning("The active model provider has no API key configured.")
             answer = input("Configure BYOK now? [Y/n] ").strip().lower()
             if answer not in {"n", "no"} and _run_provider_onboarding(workspace):
-                runtime = build_runtime(workspace, load_agent_config(workspace))
+                runtime = build_runtime(workspace)
                 agent = runtime.agent
 
     # Show active conversation info
@@ -1012,7 +1123,7 @@ def _handle_interactive_mode(auth, agent, runtime=None) -> None:
 
                 # Model and key changes must take effect on the very next prompt.
                 if command_args[0] in {"model", "keys"}:
-                    runtime = build_runtime(workspace, load_agent_config(workspace))
+                    runtime = build_runtime(workspace)
                     agent = runtime.agent
                 continue
 
@@ -1047,8 +1158,8 @@ def _handle_interactive_mode(auth, agent, runtime=None) -> None:
                 cm.add_turn(active_conv.id, "assistant", output.strip())
 
             print_session_footer(
-                provider=runtime.config.model.provider if runtime else "pulse",
-                model=runtime.config.model.name if runtime else "default",
+                provider=runtime.provider.config.provider if runtime else "pulse",
+                model=runtime.provider.config.name if runtime else "default",
                 conversation=active_conv.title,
             )
         except (KeyboardInterrupt, EOFError):

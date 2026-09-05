@@ -23,6 +23,7 @@ from pulse.git import GitIntelligence
 from pulse.memory import LongTermMemory
 from pulse.mutations import MutationTracker
 from pulse.provider import ModelProvider
+from pulse.providers.auto import AutoModelProvider
 from pulse.providers.manager import ProviderManager
 from pulse.reasoning import ReasoningEngine
 from pulse.repository import RepositoryIndex
@@ -91,6 +92,19 @@ def build_runtime(workspace: Path, config: AgentConfig | None = None) -> AgentRu
     provider = provider_manager.create_provider(
         resolved_config.model, resolved_workspace / ".env"
     )
+    selection = provider_manager.get_selection()
+    uses_saved_auto_selection = (
+        config is None
+        and selection.selection_mode == "auto"
+        and selection.provider == resolved_config.model.provider
+        and selection.model == resolved_config.model.name
+    )
+    if uses_saved_auto_selection:
+        provider = AutoModelProvider(
+            provider_manager,
+            provider,
+            resolved_workspace / ".env",
+        )
     audit.add_secret(getattr(provider, "api_key", None))
     telemetry.add_secret(getattr(provider, "api_key", None))
 

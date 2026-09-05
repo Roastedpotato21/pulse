@@ -19,6 +19,12 @@ class OpenAIProvider(BaseProvider):
         temperature: float = 0.2,
     ) -> dict[str, Any]:
         payload = super()._build_payload(messages, temperature)
+        modern_reasoning_model = self.config.name.lower().startswith(
+            ("gpt-5", "o1", "o3", "o4")
+        )
+        if modern_reasoning_model:
+            payload["max_completion_tokens"] = payload.pop("max_tokens")
+            payload.pop("temperature", None)
         if self.config.provider == "openai":
             payload["stream_options"] = {"include_usage": True}
         return payload

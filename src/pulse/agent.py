@@ -250,7 +250,7 @@ class ProjectAgent:
             if "HTTP 402" in str(error) or "(402)" in str(error):
                 return (
                     "OpenRouter accepted the API key but cannot charge this request. "
-                    "Add credits or switch to `qwen/qwen3-coder:free` with `pulse model`, "
+                    "Add credits or enable `pulse model auto openrouter` for a free model, "
                     "then retry."
                 )
             if any(

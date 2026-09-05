@@ -46,7 +46,10 @@ class AnthropicProvider(BaseProvider):
         }
         if system_prompts:
             payload["system"] = "\n\n".join(system_prompts)
-        if temperature is not None:
+        rejects_temperature = self.config.name.lower().startswith(
+            ("claude-opus-4-7", "claude-opus-4-8", "claude-opus-5", "claude-mythos")
+        )
+        if temperature is not None and not rejects_temperature:
             payload["temperature"] = temperature
         return payload
 

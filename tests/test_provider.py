@@ -6,7 +6,7 @@ import httpx
 import pytest
 
 from pulse.config import ModelConfig
-from pulse.provider import ChatMessage, OpenRouterProvider
+from pulse.provider import ChatMessage, OpenAIProvider, OpenRouterProvider
 from pulse.providers.base import ProviderRequestError
 
 
@@ -91,3 +91,17 @@ def test_payment_required_is_non_retryable_and_actionable() -> None:
     assert exc_info.value.retryable is False
     assert "private-provider-detail" not in str(exc_info.value)
     assert "select a free model" in str(exc_info.value)
+
+
+def test_modern_openai_models_use_compatible_completion_parameters() -> None:
+    provider = OpenAIProvider(
+        ModelConfig(provider="openai", name="gpt-5.6-terra", temperature=0.2),
+        Path(".env"),
+        api_key="synthetic-key",
+    )
+
+    payload = provider._build_payload([{"role": "user", "content": "hi"}])
+
+    assert payload["max_completion_tokens"] == 8192
+    assert "max_tokens" not in payload
+    assert "temperature" not in payload
