@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import shlex
+import sys
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -180,7 +181,15 @@ class InteractivePrompt:
         except OSError:
             history = InMemoryHistory()
 
-        self.session: PromptSession[str] = PromptSession(
+        self.session: PromptSession[str] | None = None
+        if (
+            input is None
+            and output is None
+            and (not sys.stdin.isatty() or not sys.stdout.isatty())
+        ):
+            return
+
+        self.session = PromptSession(
             completer=SlashCommandCompleter(parser),
             history=history,
             auto_suggest=AutoSuggestFromHistory(),
@@ -208,6 +217,13 @@ class InteractivePrompt:
         # Retain the optional argument for callers using the older API, but do
         # not repeat potentially long conversation titles in every prompt.
         del conversation
+        if self.session is None:
+            sys.stdout.write("pulse> ")
+            sys.stdout.flush()
+            value = sys.stdin.readline()
+            if value == "":
+                raise EOFError
+            return value.strip()
         return self.session.prompt(
             FormattedText(
                 [

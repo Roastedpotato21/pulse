@@ -45,7 +45,8 @@ def test_cli_module_entrypoint_without_console_does_not_traceback(
     )
 
     combined = result.stdout + result.stderr
-    assert result.returncode != 0
+    assert result.returncode == 0
+    assert "Exiting Pulse REPL." in combined
     assert "Traceback (most recent call last)" not in combined
 
 
