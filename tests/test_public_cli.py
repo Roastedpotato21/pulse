@@ -44,7 +44,7 @@ def test_version_subcommand_matches_version_flag() -> None:
         [*command, "--version"], check=True, capture_output=True, text=True, env=_module_env()
     )
 
-    assert version.stdout.strip() == flag.stdout.strip() == "pulse 0.1.1"
+    assert version.stdout.strip() == flag.stdout.strip() == "pulse 0.1.2"
 
 
 def test_provider_key_rotation_never_returns_or_duplicates_secret(

@@ -1,3 +1,4 @@
+import io
 import json
 import time
 import urllib.parse
@@ -8,6 +9,7 @@ from pulse.auth import (
     AuthConfigurationError,
     AuthenticationManager,
     AuthError,
+    OAuthCallbackHandler,
     SecureTokenStore,
     TokenSet,
     UserProfile,
@@ -24,6 +26,13 @@ from pulse.auth import (
     refresh_session,
     set_token_store_workspace,
 )
+
+TEST_CLIENT_SECRET = "GOCSPX-abcdefghijklmnopqrstuvwxyz123456"
+
+
+@pytest.fixture(autouse=True)
+def google_desktop_client_credential(monkeypatch):
+    monkeypatch.setenv("PULSE_GOOGLE_CLIENT_SECRET", TEST_CLIENT_SECRET)
 
 
 @pytest.fixture
@@ -53,6 +62,51 @@ def test_state_generation():
 
     assert len(state1) >= 32
     assert state1 != state2
+
+
+def test_oauth_callback_uses_terminal_ui_and_accurate_handoff_copy():
+    handler = object.__new__(OAuthCallbackHandler)
+    handler.path = "/?code=authorization-code&state=callback-state"
+    handler.wfile = io.BytesIO()
+    responses: list[int] = []
+    headers: dict[str, str] = {}
+    handler.send_response = responses.append
+    handler.send_header = headers.__setitem__
+    handler.end_headers = lambda: None
+
+    handler.do_GET()
+
+    page = handler.wfile.getvalue().decode("utf-8")
+    assert responses == [200]
+    assert headers["Cache-Control"] == "no-store"
+    assert headers["Content-Security-Policy"] == "default-src 'none'; style-src 'unsafe-inline'"
+    assert "pulse auth --provider google" in page
+    assert "Authorization received" in page
+    assert "validating state + securing session" in page
+    assert "Authentication Successful" not in page
+    assert "@keyframes terminal-in" in page
+    assert "prefers-reduced-motion" in page
+
+
+def test_oauth_callback_page_escapes_displayed_error_text():
+    handler = object.__new__(OAuthCallbackHandler)
+    handler.wfile = io.BytesIO()
+    handler.send_response = lambda _status: None
+    handler.send_header = lambda _name, _value: None
+    handler.end_headers = lambda: None
+
+    handler._send_response_page(
+        status=400,
+        title="Invalid <script>alert(1)</script>",
+        message="Return & retry",
+        is_success=False,
+    )
+
+    page = handler.wfile.getvalue().decode("utf-8")
+    assert "<script>" not in page
+    assert "Invalid &lt;script&gt;alert(1)&lt;/script&gt;" in page
+    assert "Return &amp; retry" in page
+    assert "ACTION REQUIRED" in page
 
 
 def test_jwt_payload_decoding():
@@ -88,6 +142,55 @@ def test_secure_token_store(auth_workspace):
     assert store.load_session() is None
 
 
+def test_secure_token_store_chunks_sessions_that_exceed_windows_vault_limit(
+    auth_workspace,
+    memory_auth_keyring,
+):
+    store = SecureTokenStore(auth_workspace)
+    user = UserProfile(email="large-session@example.com", name="Large Session", sub="123")
+    tokens = TokenSet(
+        access_token="access-" + "a" * 900,
+        refresh_token="refresh-" + "r" * 300,
+        id_token="id-token-" + "i" * 3500,
+        expires_at=time.time() + 3600,
+    )
+    old_combined_payload = json.dumps({"user": user.to_dict(), "tokens": tokens.to_dict()})
+    assert len(old_combined_payload.encode("utf-16-le")) > 2560
+
+    store.store_session(user, tokens)
+
+    stored_values = [
+        value
+        for (service, account), value in memory_auth_keyring.credentials.items()
+        if service == "pulse-cli" and account.startswith(store.account_name)
+    ]
+    assert len(stored_values) > 4
+    assert all(len(value.encode("utf-16-le")) <= 2000 for value in stored_values)
+    assert store.load_session() == (user, tokens)
+
+    store.clear_session()
+    assert not any(
+        service == "pulse-cli" and account.startswith(store.account_name)
+        for service, account in memory_auth_keyring.credentials
+    )
+
+
+def test_secure_token_store_reads_legacy_single_entry_session(
+    auth_workspace,
+    memory_auth_keyring,
+):
+    store = SecureTokenStore(auth_workspace)
+    user = UserProfile(email="legacy@example.com", name="Legacy", sub="456")
+    tokens = TokenSet(access_token="legacy-access", refresh_token="legacy-refresh")
+    memory_auth_keyring.set_password(
+        "pulse-cli",
+        store.account_name,
+        json.dumps({"user": user.to_dict(), "tokens": tokens.to_dict()}),
+    )
+
+    assert store.load_session() == (user, tokens)
+
+
 def test_is_authenticated_initial_state(auth_workspace):
     assert is_authenticated() is False
     assert get_current_user() is None
@@ -119,6 +222,7 @@ def test_google_config_never_reads_workspace_env_file(tmp_path, monkeypatch):
         encoding="utf-8",
     )
     monkeypatch.delenv("PULSE_GOOGLE_CLIENT_ID", raising=False)
+    monkeypatch.delenv("PULSE_GOOGLE_CLIENT_SECRET", raising=False)
     monkeypatch.delenv("PULSE_GOOGLE_REDIRECT_URI", raising=False)
 
     with pytest.raises(AuthConfigurationError, match="does not include"):
@@ -208,7 +312,7 @@ def test_exchange_code_for_tokens(auth_workspace, monkeypatch):
                 "sub": "987",
             }).encode("utf-8"))
         request_values = urllib.parse.parse_qs(req.data.decode("utf-8"))
-        assert "client_secret" not in request_values
+        assert request_values["client_secret"] == [TEST_CLIENT_SECRET]
         assert request_values["code_verifier"] == ["verifier_456"]
         return MockHTTPResponse(json.dumps({
             "access_token": "acc_token_abc",
@@ -288,7 +392,7 @@ def test_refresh_session_success(auth_workspace, monkeypatch):
 
     def mock_urlopen_refresh(req, *args, **kwargs):
         request_values = urllib.parse.parse_qs(req.data.decode("utf-8"))
-        assert "client_secret" not in request_values
+        assert request_values["client_secret"] == [TEST_CLIENT_SECRET]
         return MockHTTPResponse(json.dumps({
             "access_token": "new_refreshed_access_token",
             "expires_in": 3600,

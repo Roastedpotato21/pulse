@@ -2,7 +2,7 @@
   "name": "pulse-vscode",
   "displayName": "Pulse",
   "description": "Chat with the local Pulse project agent.",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "engines": { "vscode": "^1.95.0" },
   "categories": ["Other"],
   "activationEvents": ["onView:pulse.chat", "onCommand:pulse.openChat"],

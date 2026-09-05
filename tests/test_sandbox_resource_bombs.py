@@ -1,12 +1,12 @@
 """Adversarial resource exhaustion bomb tests for Pulse Sandbox."""
 
-import shutil
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import pytest
 
 from pulse.sandbox.api import Sandbox
+from pulse.sandbox.backend.docker import DockerBackend
 from pulse.sandbox.policy import ActionType, PolicyDecision, SandboxPolicy
 from pulse.sandbox.resources import ResourceLimits
 
@@ -15,13 +15,15 @@ from pulse.sandbox.resources import ResourceLimits
 @pytest.mark.anyio
 async def test_memory_exhaustion_bomb() -> None:
     """Phase 8: Hard Memory Enforcement prevents OOM cascading."""
-    if not shutil.which("docker"):
-        pytest.skip("Docker is required for memory limit tests.")
+    backend = DockerBackend(container_engine="docker")
+    if not await backend.is_available():
+        pytest.skip("An operational Docker daemon is required for memory limit tests.")
         
     with TemporaryDirectory() as directory:
         tmp_path = Path(directory)
         sandbox = Sandbox(
             workspace_root=tmp_path,
+            backend=backend,
             limits=ResourceLimits(
                 max_memory_bytes=64 * 1024 * 1024, timeout_seconds=10.0
             ),
@@ -46,13 +48,15 @@ async def test_storage_exhaustion_bomb() -> None:
     """Phase 7: Disk/Storage Isolation limits prevent disk exhaustion.
     Note: Requires daemon support for --storage-opt. If unsupported, we expect graceful fail-closed.
     """
-    if not shutil.which("docker"):
-        pytest.skip("Docker is required for storage limit tests.")
+    backend = DockerBackend(container_engine="docker")
+    if not await backend.is_available():
+        pytest.skip("An operational Docker daemon is required for storage limit tests.")
         
     with TemporaryDirectory() as directory:
         tmp_path = Path(directory)
         sandbox = Sandbox(
             workspace_root=tmp_path,
+            backend=backend,
             limits=ResourceLimits(
                 max_storage_bytes=50 * 1024 * 1024, timeout_seconds=10.0
             ),

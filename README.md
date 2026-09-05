@@ -19,10 +19,10 @@ tracking in one Python package.
 
 ## Install
 
-Install the first beta from PyPI with `pip`:
+Install the current beta from PyPI with `pip`:
 
 ```bash
-python -m pip install pulse-coding-agent==0.1.1
+python -m pip install pulse-coding-agent==0.1.2
 ```
 
 The PyPI distribution name is `pulse-coding-agent`; the Python import and
@@ -32,10 +32,10 @@ belongs to an unrelated WSGI package published in 2009.
 For an isolated command-line installation, use `uv` or `pipx`:
 
 ```bash
-uv tool install pulse-coding-agent==0.1.1
+uv tool install pulse-coding-agent==0.1.2
 ```
 
-Alternatively, use `pipx install pulse-coding-agent==0.1.1`.
+Alternatively, use `pipx install pulse-coding-agent==0.1.2`.
 
 ## Quick start
 
@@ -49,10 +49,12 @@ pulse ask "Explain this repository and identify the highest-risk missing test"
 
 After Google login, Pulse guides provider selection, model selection, and hidden
 BYOK entry. New provider keys are stored in the native OS credential vault.
-The official distribution already contains Pulse's public Google Desktop OAuth
-identity; installed users do not create a `.env` file or provide OAuth client
-credentials. Provider API keys are collected through hidden terminal input and
-are not written to the project.
+The official distribution already contains Pulse's Google Desktop OAuth client
+credentials; installed users do not create a `.env` file or provide them. As
+with every installed application, these identify the application but cannot be
+kept confidential on end-user machines; PKCE protects authorization-code
+exchange. Provider API keys are collected through hidden terminal input and are
+not written to the project.
 
 To run commands without installing Docker on the client workstation, configure
 a remote worker:
@@ -138,7 +140,7 @@ operator-managed fallback sources.
 
 ## Supported boundary
 
-The 0.1.1 beta supports the local CLI and loopback RPC server for one trusted
+The 0.1.2 beta supports the local CLI and loopback RPC server for one trusted
 user on one workstation. Pulse does not claim a security boundary between
 mutually untrusted tenants. Do not expose `pulse-rpc` or `pulse-remote` directly
 to the public internet.
@@ -169,8 +171,9 @@ Run the local quality gates:
 uv run ruff check src tests scripts
 uv run mypy
 uv run pytest tests/ -k "not sandbox" --cov=pulse --cov-report=term-missing --cov-fail-under=54
+PULSE_GOOGLE_CLIENT_ID=<desktop-client-id> PULSE_GOOGLE_CLIENT_SECRET=<desktop-credential> uv run python scripts/configure_product_oauth.py
 uv build
-uv run python scripts/verify_release_artifacts.py dist --expected-version 0.1.1
+uv run python scripts/verify_release_artifacts.py dist --expected-version 0.1.2
 ```
 
 Docker security tests require a working Docker daemon and are enforced by the

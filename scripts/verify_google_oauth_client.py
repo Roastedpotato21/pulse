@@ -12,12 +12,16 @@ try:
     from scripts.configure_product_oauth import (
         CLIENT_ID_ENV,
         CLIENT_ID_PATTERN,
+        CLIENT_SECRET_ENV,
+        CLIENT_SECRET_PATTERN,
         DEFAULT_REDIRECT_URI,
     )
 except ImportError:  # Direct execution places scripts/ rather than the repository on sys.path.
     from configure_product_oauth import (  # type: ignore[no-redef]
         CLIENT_ID_ENV,
         CLIENT_ID_PATTERN,
+        CLIENT_SECRET_ENV,
+        CLIENT_SECRET_PATTERN,
         DEFAULT_REDIRECT_URI,
     )
 
@@ -26,11 +30,17 @@ def verify() -> None:
     client_id = os.environ.get(CLIENT_ID_ENV, "").strip()
     if not CLIENT_ID_PATTERN.fullmatch(client_id):
         raise ValueError("The release Google Desktop OAuth client ID is missing or malformed.")
+    client_secret = os.environ.get(CLIENT_SECRET_ENV, "").strip()
+    if not CLIENT_SECRET_PATTERN.fullmatch(client_secret):
+        raise ValueError(
+            "The release Google Desktop OAuth client credential is missing or malformed."
+        )
     request = urllib.request.Request(
         "https://oauth2.googleapis.com/token",
         data=urllib.parse.urlencode(
             {
                 "client_id": client_id,
+                "client_secret": client_secret,
                 "code": "pulse-release-invalid-code",
                 "code_verifier": "a" * 64,
                 "grant_type": "authorization_code",
@@ -47,12 +57,6 @@ def verify() -> None:
         except (UnicodeDecodeError, json.JSONDecodeError) as parse_error:
             raise RuntimeError("Google returned an unreadable OAuth validation response.") from parse_error
         oauth_error = payload.get("error")
-        description = str(payload.get("error_description", "")).lower()
-        if "client_secret" in description:
-            raise RuntimeError(
-                "The configured OAuth client requires a secret. Create a Google Desktop client; "
-                "never distribute a Web client secret in Pulse."
-            ) from error
         if oauth_error not in {"invalid_grant", "invalid_request"}:
             raise RuntimeError(
                 f"Google rejected the configured product OAuth client ({oauth_error or 'unknown'})."
@@ -65,7 +69,7 @@ def verify() -> None:
 
 def main() -> None:
     verify()
-    print("Google recognized the release OAuth client as a secretless public client.")
+    print("Google recognized the release OAuth client credentials.")
 
 
 if __name__ == "__main__":

@@ -52,6 +52,7 @@ EXPECTED_RUNTIME_REQUIREMENTS = {
 ALLOWED_SDIST_ROOT_FILES = {
     ".gitignore",
     "CHANGELOG.md",
+    "hatch_build.py",
     "PKG-INFO",
     "PRIVACY.md",
     "README.md",
@@ -68,9 +69,9 @@ INTERNAL_PATH_PATTERNS = (
 PRIVATE_KEY_MARKER = re.compile(
     rb"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"
 )
+GOOGLE_CLIENT_SECRET_PATTERN = re.compile(rb"GOCSPX-[0-9A-Za-z_-]{20,}")
 HIGH_CONFIDENCE_SECRET_PATTERNS = (
     re.compile(rb"AIza[0-9A-Za-z_-]{30,}"),
-    re.compile(rb"GOCSPX-[0-9A-Za-z_-]{20,}"),
     re.compile(rb"AKIA[0-9A-Z]{16}"),
     re.compile(rb"gh[pousr]_[0-9A-Za-z]{30,}"),
     re.compile(rb"sk-(?:proj-)?[0-9A-Za-z_-]{24,}"),
@@ -173,12 +174,21 @@ def _validate_public_oauth_config(wheel: Path) -> None:
         config = json.loads(raw)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise ValueError(f"{wheel.name} has invalid Google OAuth configuration") from error
-    if not isinstance(config, dict) or set(config) != {"client_id", "redirect_uri"}:
+    if not isinstance(config, dict) or set(config) != {
+        "client_id",
+        "client_secret",
+        "redirect_uri",
+    }:
         raise ValueError(f"{wheel.name} has invalid Google OAuth configuration fields")
     client_id = config.get("client_id")
+    client_secret = config.get("client_secret")
     redirect_uri = config.get("redirect_uri")
     if not isinstance(client_id, str) or not GOOGLE_CLIENT_ID_PATTERN.fullmatch(client_id):
         raise ValueError(f"{wheel.name} has a missing or placeholder Google OAuth client ID")
+    if not isinstance(client_secret, str) or not GOOGLE_CLIENT_SECRET_PATTERN.fullmatch(
+        client_secret.encode("utf-8")
+    ):
+        raise ValueError(f"{wheel.name} has a missing Google Desktop OAuth credential")
     if not isinstance(redirect_uri, str):
         raise TypeError(f"{wheel.name} has a non-string Google OAuth redirect URI")
     try:
@@ -201,10 +211,16 @@ def _validate_public_oauth_config(wheel: Path) -> None:
 def _validate_content(archive_path: Path, members: list[tuple[str, bytes]]) -> None:
     violations: list[str] = []
     for name, content in members:
+        normalized_name = name.replace("\\", "/")
+        google_client_credential_outside_product_config = (
+            not normalized_name.endswith("pulse/_product_oauth.json")
+            and GOOGLE_CLIENT_SECRET_PATTERN.search(content)
+        )
         if (
             PRIVATE_KEY_MARKER.search(content)
             or any(pattern.search(content) for pattern in INTERNAL_PATH_PATTERNS)
             or any(pattern.search(content) for pattern in HIGH_CONFIDENCE_SECRET_PATTERNS)
+            or google_client_credential_outside_product_config
         ):
             violations.append(name)
     if violations:

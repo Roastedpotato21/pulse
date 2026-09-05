@@ -239,6 +239,7 @@ class AgentManager:
         class AgentManagerResult:
             final_response: str
 
+        message_start = len(self.shared_context.messages)
         for ctx in context:
             self.shared_context.post_message(AgentMessage(
                 sender="System",
@@ -250,16 +251,25 @@ class AgentManager:
         task = await self.task_manager.create_task(goal=prompt, title=prompt[:45])
         await self.task_manager.queue_task(task.id)
         
+        last_failure: str | None = None
         async for event in self.execute_task_graph():
-            if event.event_type == StreamEventType.ERROR:
-                print(f"ERROR IN AGENT MANAGER: {event.content}")
-            
-        final_response = "No response generated."
-        agent_msgs = [m for m in self.shared_context.messages if m.sender != "System"]
+            if event.event_type in {StreamEventType.ERROR, StreamEventType.TOOL_FAILED}:
+                last_failure = event.content
+
+        new_messages = self.shared_context.messages[message_start:]
+        agent_msgs = [
+            message
+            for message in new_messages
+            if message.sender != "System" and message.content.strip()
+        ]
         if agent_msgs:
-            final_response = agent_msgs[-1].content
-            
-        return AgentManagerResult(final_response=final_response)
+            return AgentManagerResult(final_response=agent_msgs[-1].content)
+
+        finished_task = self.task_manager.get_task(task.id)
+        failure = finished_task.error if finished_task and finished_task.error else last_failure
+        if failure:
+            raise RuntimeError(failure)
+        raise RuntimeError("The model completed without returning any response content.")
 
     async def execute_task_graph(
         self,

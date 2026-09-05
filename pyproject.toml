@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pulse-coding-agent"
-version = "0.1.1"
+version = "0.1.2"
 description = "Permissioned coding-agent CLI with durable planning and isolated execution."
 readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.11,<3.14"
@@ -49,6 +49,9 @@ package = true
 [tool.hatch.build.targets.wheel]
 packages = ["src/pulse"]
 
+[tool.hatch.build.hooks.custom]
+path = "hatch_build.py"
+
 [tool.hatch.build.targets.sdist]
 include = [
     "/src",
@@ -56,6 +59,7 @@ include = [
     "/SECURITY.md",
     "/PRIVACY.md",
     "/CHANGELOG.md",
+    "/hatch_build.py",
     "/pyproject.toml",
 ]
 
@@ -83,6 +87,7 @@ files = [
 
 [dependency-groups]
 dev = [
+    "hatchling>=1.27,<2",
     "mypy>=1.18,<2",
     "pip-audit>=2.9.0",
     "pytest>=9.1.1",

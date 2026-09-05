@@ -9,12 +9,14 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 CLIENT_ID_ENV = "PULSE_GOOGLE_CLIENT_ID"
+CLIENT_SECRET_ENV = "PULSE_GOOGLE_CLIENT_SECRET"
 REDIRECT_URI_ENV = "PULSE_GOOGLE_REDIRECT_URI"
 DEFAULT_REDIRECT_URI = "http://127.0.0.1"
 OUTPUT = Path(__file__).parent.parent / "src" / "pulse" / "_product_oauth.json"
 CLIENT_ID_PATTERN = re.compile(
     r"^[0-9]+-[A-Za-z0-9_-]+\.apps\.googleusercontent\.com$"
 )
+CLIENT_SECRET_PATTERN = re.compile(r"^GOCSPX-[A-Za-z0-9_-]{20,}$")
 
 
 def _validate_redirect_uri(value: str) -> str:
@@ -44,13 +46,23 @@ def configure() -> Path:
         raise ValueError(
             "PULSE_GOOGLE_CLIENT_ID must contain the release's Google Desktop client ID."
         )
+    client_secret = os.environ.get(CLIENT_SECRET_ENV, "").strip()
+    if not CLIENT_SECRET_PATTERN.fullmatch(client_secret):
+        raise ValueError(
+            "PULSE_GOOGLE_CLIENT_SECRET must contain the release's Google Desktop client "
+            "credential. Google treats installed applications as public clients."
+        )
     redirect_uri = _validate_redirect_uri(
         os.environ.get(REDIRECT_URI_ENV, DEFAULT_REDIRECT_URI).strip()
         or DEFAULT_REDIRECT_URI
     )
     OUTPUT.write_text(
         json.dumps(
-            {"client_id": client_id, "redirect_uri": redirect_uri},
+            {
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "redirect_uri": redirect_uri,
+            },
             indent=2,
             sort_keys=True,
         )
@@ -62,7 +74,7 @@ def configure() -> Path:
 
 def main() -> None:
     configure()
-    print("Configured the public Google Desktop OAuth client for this product build.")
+    print("Configured the Google Desktop OAuth client for this product build.")
 
 
 if __name__ == "__main__":

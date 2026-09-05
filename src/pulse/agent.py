@@ -247,12 +247,16 @@ class ProjectAgent:
     def _provider_recovery_hint(self, error: RuntimeError) -> str:
         provider_name = self.provider.config.provider
         if provider_name == "openrouter":
-            if "(402)" in str(error):
+            if "HTTP 402" in str(error) or "(402)" in str(error):
                 return (
                     "OpenRouter accepted the API key but cannot charge this request. "
-                    "Add credits or use a model your OpenRouter account can access, then retry."
+                    "Add credits or switch to `qwen/qwen3-coder:free` with `pulse model`, "
+                    "then retry."
                 )
-            if "(401)" in str(error) or "(403)" in str(error):
+            if any(
+                marker in str(error)
+                for marker in ("HTTP 401", "HTTP 403", "(401)", "(403)")
+            ):
                 return "OpenRouter rejected the API key or model access. Check OPENROUTER_API_KEY and the selected model."
             return (
                 "OpenRouter returned an error. Check your OpenRouter credits/billing and API key, "

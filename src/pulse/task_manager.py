@@ -1751,7 +1751,11 @@ class TaskManager:
             return None
         except Exception as err:  # noqa: BLE001
             try:
-                return await self.fail_task(task_id, str(err))
+                return await self.fail_task(
+                    task_id,
+                    str(err),
+                    retryable=bool(getattr(err, "retryable", True)),
+                )
             except (StaleWorkerError, LeaseLostError):
                 logger.warning("Cannot record start failure for %s.", task_id)
                 return None
@@ -1776,7 +1780,11 @@ class TaskManager:
             return None
         except Exception as err:  # noqa: BLE001
             try:
-                return await self.fail_task(task_id, str(err))
+                return await self.fail_task(
+                    task_id,
+                    str(err),
+                    retryable=bool(getattr(err, "retryable", True)),
+                )
             except StaleWorkerError:
                 logger.warning("Cannot fail task %s: ownership lost.", task_id)
                 return None

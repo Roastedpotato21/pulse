@@ -17,7 +17,10 @@ class GeminiProvider(BaseProvider):
         model_name = self.config.name
         if not model_name.startswith("models/"):
             model_name = f"models/{model_name}"
-        return f"https://generativelanguage.googleapis.com/v1beta/{model_name}:streamGenerateContent"
+        return (
+            "https://generativelanguage.googleapis.com/v1beta/"
+            f"{model_name}:streamGenerateContent?alt=sse"
+        )
 
     def _headers(self) -> dict[str, str]:
         return {

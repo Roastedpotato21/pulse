@@ -5,6 +5,25 @@ pre-1.0 APIs may change with release notes and migration guidance.
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-09-05
+
+### Fixed
+
+- Google authorization-code exchange and token refresh now send the Desktop
+  client credential required by Google's token endpoint. Google documents that
+  installed applications cannot keep this value confidential; PKCE remains the
+  authorization-code interception protection.
+- Packaging now fails before creating a wheel or source distribution when the
+  product Google Desktop OAuth credentials are missing or malformed, preventing
+  the placeholder configuration shipped by the invalid 0.1.1 PyPI artifacts.
+- The release workflow validates the configured credential pair against
+  Google's token endpoint before building.
+
+### Security
+
+- Release operators must publish only through the protected trusted-publisher
+  workflow; direct uploads bypass provenance and release verification.
+
 ## [0.1.1] - 2026-09-04
 
 ### Added

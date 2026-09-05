@@ -407,7 +407,7 @@ def _handle_model_command(
             print_all_models_list(providers, active_prov, active_mod)
         return
 
-    # Direct provider setting: pulse model openrouter [qwen/qwen3-coder]
+    # Direct provider setting: pulse model openrouter [qwen/qwen3-coder:free]
     if provider_arg:
         try:
             spec = pm.get_provider_spec(provider_arg)

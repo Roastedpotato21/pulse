@@ -17,6 +17,15 @@ from pulse.core.protocols import LLMProvider, StreamChunk
 ModelProvider = LLMProvider
 
 
+class ProviderRequestError(RuntimeError):
+    """Safe provider failure annotated with whether retrying can help."""
+
+    def __init__(self, message: str, *, status_code: int, retryable: bool) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.retryable = retryable
+
+
 @dataclass(frozen=True)
 class ChatMessage:
     role: str
@@ -86,8 +95,11 @@ class BaseProvider(ABC, LLMProvider):
             except httpx.HTTPStatusError as error:
                 detail = self._safe_error_detail(error)
                 code = error.response.status_code if error.response else "unknown"
-                raise RuntimeError(
-                    f"Model request failed ({self.config.provider} HTTP {code}): {detail}"
+                status_code = error.response.status_code if error.response else 0
+                raise ProviderRequestError(
+                    f"Model request failed ({self.config.provider} HTTP {code}): {detail}",
+                    status_code=status_code,
+                    retryable=self._http_status_is_retryable(status_code),
                 ) from error
             except httpx.HTTPError as error:
                 raise RuntimeError(
@@ -142,8 +154,11 @@ class BaseProvider(ABC, LLMProvider):
         except httpx.HTTPStatusError as error:
             detail = self._safe_error_detail(error)
             code = error.response.status_code if error.response else "unknown"
-            raise RuntimeError(
-                f"Model request failed ({self.config.provider} HTTP {code}): {detail}"
+            status_code = error.response.status_code if error.response else 0
+            raise ProviderRequestError(
+                f"Model request failed ({self.config.provider} HTTP {code}): {detail}",
+                status_code=status_code,
+                retryable=self._http_status_is_retryable(status_code),
             ) from error
         except httpx.HTTPError as error:
             raise RuntimeError(
@@ -206,6 +221,11 @@ class BaseProvider(ABC, LLMProvider):
 
         if status == 401:
             return f"Invalid or unauthenticated API key ({self.api_key_env_var})."
+        if status == 402:
+            return (
+                f"The {self.config.provider} account has insufficient credits or paid-model "
+                "access for this request. Add credits or select a free model."
+            )
         if status == 404:
             return f"Model '{self.config.name}' was not found or is unavailable for {self.config.provider}."
         if status == 429:
@@ -214,6 +234,10 @@ class BaseProvider(ABC, LLMProvider):
         # Provider-controlled bodies may reflect prompts, request payloads, or
         # credentials. They must never cross into CLI, RPC, telemetry, or logs.
         return "The provider rejected the request. Check provider status and configuration."
+
+    @staticmethod
+    def _http_status_is_retryable(status: int) -> bool:
+        return status in {408, 409, 425, 429} or status >= 500
 
     def _normalize_messages(
         self, messages: list[dict[str, Any] | ChatMessage]

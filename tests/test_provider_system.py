@@ -51,6 +51,18 @@ def test_gemini_provider_streams_chunks() -> None:
     assert [chunk.content for chunk in chunks] == ["Hello", " world"]
 
 
+def test_gemini_provider_requests_sse_stream() -> None:
+    provider = GeminiProvider(
+        ModelConfig(provider="gemini", name="gemini-3.6-flash", temperature=0.2),
+        Path(".env"),
+        api_key="secret",
+    )
+
+    assert provider.endpoint.endswith(
+        "/models/gemini-3.6-flash:streamGenerateContent?alt=sse"
+    )
+
+
 async def _collect_chunks(provider: GeminiProvider) -> list:
     collected = []
     async for chunk in provider.generate_stream([{"role": "user", "content": "hi"}], temperature=0.1):

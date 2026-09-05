@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import html as html_lib
 import http.server
 import importlib.resources
 import json
@@ -36,13 +37,19 @@ logger = logging.getLogger(__name__)
 
 KEYRING_SERVICE_NAME = "pulse-cli"
 KEYRING_ACCOUNT_NAME = "current_session"
+KEYRING_SESSION_VERSION = 2
+KEYRING_CHUNK_CHAR_LIMIT = 1000
+KEYRING_MAX_CHUNKS_PER_FIELD = 16
+KEYRING_SESSION_FIELDS = ("user", "access_token", "refresh_token", "id_token")
 PRODUCT_OAUTH_RESOURCE = "_product_oauth.json"
 PRODUCT_CLIENT_ID_ENV = "PULSE_GOOGLE_CLIENT_ID"
+PRODUCT_CLIENT_SECRET_ENV = "PULSE_GOOGLE_CLIENT_SECRET"
 PRODUCT_REDIRECT_URI_ENV = "PULSE_GOOGLE_REDIRECT_URI"
 DEFAULT_REDIRECT_URI = "http://127.0.0.1"
 _GOOGLE_CLIENT_ID = re.compile(
     r"^[0-9]+-[A-Za-z0-9_-]+\.apps\.googleusercontent\.com$"
 )
+_GOOGLE_CLIENT_SECRET = re.compile(r"^GOCSPX-[A-Za-z0-9_-]{20,}$")
 _UNCONFIGURED_CLIENT_IDS = {"", "not-configured", "placeholder", "replace_me"}
 
 
@@ -164,7 +171,10 @@ def decode_jwt_payload(jwt_token: str) -> dict[str, Any]:
     payload_b64 = parts[1]
     padding = "=" * (-len(payload_b64) % 4)
     decoded_bytes = base64.urlsafe_b64decode((payload_b64 + padding).encode("utf-8"))
-    return json.loads(decoded_bytes.decode("utf-8"))
+    decoded: Any = json.loads(decoded_bytes.decode("utf-8"))
+    if not isinstance(decoded, dict):
+        return {}
+    return {str(key): value for key, value in decoded.items()}
 
 
 # --- Secure Storage (Keyring + File Fallback) ---
@@ -180,24 +190,155 @@ class SecureTokenStore:
         ).hexdigest()[:24]
         self.account_name = f"{KEYRING_ACCOUNT_NAME}:{digest}"
 
-    def store_session(self, user: UserProfile, tokens: TokenSet) -> None:
-        payload = json.dumps({
-            "user": user.to_dict(),
-            "tokens": tokens.to_dict(),
-        })
+    def _field_account(self, field: str, index: int) -> str:
+        return f"{self.account_name}:{field}:{index}"
 
+    def _split_value(self, value: str) -> list[str]:
+        chunks = [
+            value[index:index + KEYRING_CHUNK_CHAR_LIMIT]
+            for index in range(0, len(value), KEYRING_CHUNK_CHAR_LIMIT)
+        ]
+        if len(chunks) > KEYRING_MAX_CHUNKS_PER_FIELD:
+            raise AuthError("The authentication session is too large for secure storage.")
+        return chunks
+
+    def _manifest_accounts(self, raw_manifest: str | None) -> set[str]:
+        if not raw_manifest:
+            return set()
+        try:
+            manifest = json.loads(raw_manifest)
+        except (json.JSONDecodeError, TypeError):
+            return set()
+        if not isinstance(manifest, dict) or manifest.get("version") != KEYRING_SESSION_VERSION:
+            return set()
+        counts = manifest.get("chunks")
+        if not isinstance(counts, dict):
+            return set()
+
+        accounts: set[str] = set()
+        for field in KEYRING_SESSION_FIELDS:
+            count = counts.get(field, 0)
+            if (
+                isinstance(count, bool)
+                or not isinstance(count, int)
+                or not 0 <= count <= KEYRING_MAX_CHUNKS_PER_FIELD
+            ):
+                return set()
+            accounts.update(self._field_account(field, index) for index in range(count))
+        return accounts
+
+    def _load_chunked_session(self, manifest: dict[str, Any]) -> tuple[UserProfile, TokenSet] | None:
+        counts = manifest.get("chunks")
+        if not isinstance(counts, dict) or set(counts) - set(KEYRING_SESSION_FIELDS):
+            return None
+
+        values: dict[str, str | None] = {}
+        for field in KEYRING_SESSION_FIELDS:
+            count = counts.get(field, 0)
+            if (
+                isinstance(count, bool)
+                or not isinstance(count, int)
+                or not 0 <= count <= KEYRING_MAX_CHUNKS_PER_FIELD
+                or (field in {"user", "access_token"} and count == 0)
+            ):
+                return None
+
+            chunks: list[str] = []
+            for index in range(count):
+                chunk = keyring.get_password(
+                    KEYRING_SERVICE_NAME,
+                    self._field_account(field, index),
+                )
+                if not isinstance(chunk, str) or not chunk:
+                    return None
+                chunks.append(chunk)
+            values[field] = "".join(chunks) if chunks else None
+
+        raw_user = values["user"]
+        if not isinstance(raw_user, str):
+            return None
+        user_data = json.loads(raw_user)
+        if not isinstance(user_data, dict):
+            return None
+        user = UserProfile.from_dict(user_data)
+        access_token = values["access_token"]
+        if not user.email or not isinstance(access_token, str) or not access_token:
+            return None
+        tokens = TokenSet(
+            access_token=access_token,
+            refresh_token=values["refresh_token"],
+            id_token=values["id_token"],
+            expires_at=float(manifest.get("expires_at", 0.0)),
+        )
+        return user, tokens
+
+    def store_session(self, user: UserProfile, tokens: TokenSet) -> None:
         if keyring is None:
             raise AuthError("The OS credential vault is unavailable; the session was not stored.")
+
+        field_values = {
+            "user": json.dumps(user.to_dict(), separators=(",", ":")),
+            "access_token": tokens.access_token,
+            "refresh_token": tokens.refresh_token or "",
+            "id_token": tokens.id_token or "",
+        }
+        field_chunks = {
+            field: self._split_value(value) if value else []
+            for field, value in field_values.items()
+        }
+        manifest = json.dumps(
+            {
+                "version": KEYRING_SESSION_VERSION,
+                "expires_at": tokens.expires_at,
+                "chunks": {field: len(field_chunks[field]) for field in KEYRING_SESSION_FIELDS},
+            },
+            separators=(",", ":"),
+        )
+        new_entries = {
+            self._field_account(field, index): chunk
+            for field, chunks in field_chunks.items()
+            for index, chunk in enumerate(chunks)
+        }
+
         try:
-            keyring.set_password(KEYRING_SERVICE_NAME, self.account_name, payload)
-            persisted = keyring.get_password(KEYRING_SERVICE_NAME, self.account_name)
+            previous_manifest = keyring.get_password(KEYRING_SERVICE_NAME, self.account_name)
+            old_accounts = self._manifest_accounts(previous_manifest)
+            touched_accounts = old_accounts | set(new_entries) | {self.account_name}
+            previous_values = {
+                account: keyring.get_password(KEYRING_SERVICE_NAME, account)
+                for account in touched_accounts
+            }
+
+            for account, value in new_entries.items():
+                keyring.set_password(KEYRING_SERVICE_NAME, account, value)
+                persisted = keyring.get_password(KEYRING_SERVICE_NAME, account)
+                if not persisted or not hmac.compare_digest(persisted, value):
+                    raise RuntimeError("The OS credential vault did not confirm a session chunk.")
+
+            # The manifest is written last and acts as the commit marker.
+            keyring.set_password(KEYRING_SERVICE_NAME, self.account_name, manifest)
+            persisted_manifest = keyring.get_password(KEYRING_SERVICE_NAME, self.account_name)
+            if not persisted_manifest or not hmac.compare_digest(persisted_manifest, manifest):
+                raise RuntimeError("The OS credential vault did not confirm the session manifest.")
         except Exception as error:
+            for account, previous_value in locals().get("previous_values", {}).items():
+                try:
+                    if previous_value is None:
+                        keyring.delete_password(KEYRING_SERVICE_NAME, account)
+                    else:
+                        keyring.set_password(KEYRING_SERVICE_NAME, account, previous_value)
+                except Exception:  # noqa: BLE001
+                    logger.debug("OS credential vault rollback was incomplete.")
             logger.debug("OS credential vault storage failed.")
             raise AuthError(
                 "The OS credential vault rejected the session; no plaintext fallback was written."
             ) from error
-        if not persisted or not hmac.compare_digest(persisted, payload):
-            raise AuthError("The OS credential vault did not confirm session persistence.")
+
+        for stale_account in old_accounts - set(new_entries):
+            try:
+                keyring.delete_password(KEYRING_SERVICE_NAME, stale_account)
+            except Exception:  # noqa: BLE001
+                logger.debug("A stale OS credential vault entry could not be removed.")
         if self.fallback_file.exists():
             try:
                 self.fallback_file.unlink()
@@ -219,20 +360,31 @@ class SecureTokenStore:
 
         try:
             data = json.loads(raw_payload)
+            if isinstance(data, dict) and data.get("version") == KEYRING_SESSION_VERSION:
+                return self._load_chunked_session(data)
+            if not isinstance(data, dict):
+                return None
             user = UserProfile.from_dict(data.get("user", {}))
             tokens = TokenSet.from_dict(data.get("tokens", {}))
             if not user.email or not tokens.access_token:
                 return None
             return user, tokens
-        except (json.JSONDecodeError, TypeError, KeyError):
+        except (json.JSONDecodeError, TypeError, KeyError, ValueError):
             return None
 
     def clear_session(self) -> None:
         if keyring is not None:
+            accounts: set[str] = set()
             try:
-                keyring.delete_password(KEYRING_SERVICE_NAME, self.account_name)
+                manifest = keyring.get_password(KEYRING_SERVICE_NAME, self.account_name)
+                accounts = self._manifest_accounts(manifest)
             except Exception:  # noqa: BLE001
                 logger.debug("OS credential vault clear was unavailable.")
+            for account in {self.account_name} | accounts:
+                try:
+                    keyring.delete_password(KEYRING_SERVICE_NAME, account)
+                except Exception:  # noqa: BLE001
+                    logger.debug("OS credential vault clear was unavailable.")
 
         if self.fallback_file.exists():
             try:
@@ -277,8 +429,8 @@ class OAuthCallbackHandler(http.server.BaseHTTPRequestHandler):
             OAuthCallbackHandler.received_state = params["state"][0]
             self._send_response_page(
                 status=200,
-                title="Authentication Successful",
-                message="Successfully authenticated with Pulse. You can close this window and return to your terminal.",
+                title="Authorization received",
+                message="Pulse is validating the callback and securing your session. Return to your terminal to finish sign-in.",
                 is_success=True,
             )
             return
@@ -291,47 +443,273 @@ class OAuthCallbackHandler(http.server.BaseHTTPRequestHandler):
         )
 
     def _send_response_page(self, status: int, title: str, message: str, is_success: bool) -> None:
-        color = "#22c55e" if is_success else "#ef4444"
-        html = f"""<!DOCTYPE html>
-<html>
+        accent = "#36f19b" if is_success else "#ff5c72"
+        accent_soft = "#1fbf78" if is_success else "#d43e55"
+        state_class = "is-success" if is_success else "is-error"
+        status_label = "HANDOFF READY" if is_success else "ACTION REQUIRED"
+        result_label = "callback received" if is_success else "authorization interrupted"
+        progress_label = (
+            "validating state + securing session"
+            if is_success
+            else "check the terminal for details"
+        )
+        safe_title = html_lib.escape(title)
+        safe_message = html_lib.escape(message)
+        page = f"""<!DOCTYPE html>
+<html lang="en">
 <head>
     <meta charset="utf-8">
-    <title>{title}</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <title>Pulse · {safe_title}</title>
     <style>
+        :root {{
+            color-scheme: dark;
+            --bg: #070b12;
+            --panel: #0c121c;
+            --panel-raised: #111a27;
+            --line: #243246;
+            --text: #d9e2ef;
+            --muted: #718096;
+            --cyan: #20d8ee;
+            --accent: {accent};
+            --accent-soft: {accent_soft};
+        }}
+
+        * {{ box-sizing: border-box; }}
+
+        html, body {{ min-height: 100%; }}
+
         body {{
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-            background-color: #0f172a;
-            color: #f8fafc;
+            margin: 0;
+            min-height: 100vh;
             display: flex;
             align-items: center;
             justify-content: center;
-            height: 100vh;
-            margin: 0;
+            overflow: hidden;
+            padding: 28px;
+            background:
+                radial-gradient(circle at 50% 42%, rgba(32, 216, 238, .07), transparent 36%),
+                linear-gradient(180deg, #080d16 0%, var(--bg) 100%);
+            color: var(--text);
+            font-family: "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
         }}
-        .card {{
-            background-color: #1e293b;
-            padding: 2.5rem;
-            border-radius: 12px;
-            box-shadow: 0 10px 25px rgba(0,0,0,0.5);
-            text-align: center;
-            max-width: 420px;
-            border: 1px solid #334155;
+
+        body::before {{
+            position: fixed;
+            inset: 0;
+            pointer-events: none;
+            content: "";
+            opacity: .22;
+            background-image:
+                linear-gradient(rgba(255,255,255,.018) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(255,255,255,.014) 1px, transparent 1px);
+            background-size: 24px 24px;
         }}
-        h1 {{ color: {color}; margin-bottom: 1rem; font-size: 1.5rem; }}
-        p {{ color: #94a3b8; font-size: 1rem; line-height: 1.5; }}
+
+        .terminal {{
+            position: relative;
+            width: min(720px, 100%);
+            overflow: hidden;
+            border: 1px solid var(--line);
+            border-radius: 14px;
+            background: rgba(12, 18, 28, .96);
+            box-shadow:
+                0 32px 90px rgba(0, 0, 0, .55),
+                0 0 0 1px rgba(255, 255, 255, .025) inset,
+                0 0 42px color-mix(in srgb, var(--accent) 8%, transparent);
+            animation: terminal-in 650ms cubic-bezier(.2,.8,.2,1) both;
+        }}
+
+        .terminal::after {{
+            position: absolute;
+            inset: 0;
+            pointer-events: none;
+            content: "";
+            background: linear-gradient(transparent 50%, rgba(255,255,255,.012) 50%);
+            background-size: 100% 4px;
+            opacity: .35;
+        }}
+
+        .terminal-bar {{
+            position: relative;
+            z-index: 1;
+            min-height: 48px;
+            display: grid;
+            grid-template-columns: 1fr auto 1fr;
+            align-items: center;
+            gap: 16px;
+            padding: 0 18px;
+            border-bottom: 1px solid var(--line);
+            background: var(--panel-raised);
+            font-size: 11px;
+            letter-spacing: .08em;
+        }}
+
+        .window-controls {{ display: flex; gap: 7px; }}
+        .window-controls i {{ width: 8px; height: 8px; border-radius: 50%; background: #425069; }}
+        .window-controls i:first-child {{ background: #ff5f57; }}
+        .window-controls i:nth-child(2) {{ background: #febc2e; }}
+        .window-controls i:last-child {{ background: #28c840; }}
+
+        .path {{ color: var(--muted); white-space: nowrap; }}
+        .path strong {{ color: var(--cyan); font-weight: 600; }}
+
+        .status {{
+            justify-self: end;
+            padding: 5px 8px;
+            border: 1px solid color-mix(in srgb, var(--accent) 38%, transparent);
+            border-radius: 4px;
+            color: var(--accent);
+            background: color-mix(in srgb, var(--accent) 7%, transparent);
+            font-size: 9px;
+            font-weight: 700;
+            letter-spacing: .12em;
+        }}
+
+        .terminal-body {{
+            position: relative;
+            z-index: 1;
+            padding: clamp(30px, 6vw, 54px);
+        }}
+
+        .brand {{
+            display: flex;
+            align-items: center;
+            gap: 13px;
+            margin-bottom: 34px;
+            color: #f3f7fb;
+            font-size: 14px;
+            font-weight: 700;
+            letter-spacing: .14em;
+            text-transform: uppercase;
+        }}
+
+        .brand-mark {{
+            width: 34px;
+            height: 34px;
+            display: grid;
+            place-items: center;
+            border: 1px solid color-mix(in srgb, var(--cyan) 50%, transparent);
+            border-radius: 6px;
+            color: var(--cyan);
+            background: rgba(32, 216, 238, .06);
+            box-shadow: 0 0 18px rgba(32, 216, 238, .1);
+        }}
+
+        .brand span {{ color: var(--muted); font-weight: 500; }}
+
+        .command {{
+            padding-bottom: 22px;
+            border-bottom: 1px dashed #233044;
+            color: #bdc9d8;
+            font-size: clamp(13px, 2.2vw, 16px);
+            line-height: 1.7;
+        }}
+
+        .prompt {{ color: var(--cyan); }}
+
+        .caret {{
+            display: inline-block;
+            width: .58em;
+            height: 1.08em;
+            margin-left: 7px;
+            vertical-align: -.17em;
+            background: var(--cyan);
+            animation: blink 1s steps(1, end) infinite;
+        }}
+
+        .output {{ padding: 22px 0 8px; }}
+        .output-line {{
+            display: flex;
+            gap: 13px;
+            margin: 0 0 13px;
+            color: #9eacbd;
+            font-size: clamp(12px, 2vw, 14px);
+            line-height: 1.65;
+            opacity: 0;
+            transform: translateY(5px);
+            animation: line-in 360ms ease-out forwards;
+        }}
+        .output-line:nth-child(1) {{ animation-delay: 500ms; }}
+        .output-line:nth-child(2) {{ animation-delay: 850ms; }}
+        .output-line:nth-child(3) {{ animation-delay: 1200ms; }}
+        .label {{ min-width: 62px; color: var(--muted); }}
+        .output-line.result {{ color: var(--accent); }}
+        .output-line.result .label {{ color: var(--accent-soft); }}
+        .output-line.next {{ color: #c7d2df; }}
+        .output-line.next .label {{ color: var(--cyan); }}
+
+        .message {{
+            margin: 25px 0 0;
+            padding: 16px 18px;
+            border-left: 2px solid var(--accent);
+            background: color-mix(in srgb, var(--accent) 5%, transparent);
+            color: #8797aa;
+            font-size: 12px;
+            line-height: 1.65;
+        }}
+
+        .message strong {{ color: var(--text); font-weight: 500; }}
+
+        @keyframes terminal-in {{
+            from {{ opacity: 0; transform: translateY(14px) scale(.985); }}
+            to {{ opacity: 1; transform: translateY(0) scale(1); }}
+        }}
+        @keyframes line-in {{ to {{ opacity: 1; transform: translateY(0); }} }}
+        @keyframes blink {{ 0%, 48% {{ opacity: 1; }} 49%, 100% {{ opacity: 0; }} }}
+
+        @media (max-width: 540px) {{
+            body {{ padding: 14px; align-items: flex-start; padding-top: 12vh; }}
+            .terminal-bar {{ grid-template-columns: auto 1fr; }}
+            .path {{ text-align: right; overflow: hidden; text-overflow: ellipsis; }}
+            .status {{ display: none; }}
+            .terminal-body {{ padding: 28px 23px 26px; }}
+            .label {{ min-width: 50px; }}
+        }}
+
+        @media (prefers-reduced-motion: reduce) {{
+            *, *::before, *::after {{
+                animation-duration: .01ms !important;
+                animation-delay: 0ms !important;
+                animation-iteration-count: 1 !important;
+            }}
+        }}
     </style>
 </head>
-<body>
-    <div class="card">
-        <h1>{title}</h1>
-        <p>{message}</p>
-    </div>
+<body class="{state_class}">
+    <main class="terminal" role="status" aria-live="polite">
+        <header class="terminal-bar">
+            <div class="window-controls" aria-hidden="true"><i></i><i></i><i></i></div>
+            <div class="path"><strong>pulse</strong> ~/auth/google</div>
+            <div class="status">{status_label}</div>
+        </header>
+        <section class="terminal-body">
+            <div class="brand">
+                <div class="brand-mark" aria-hidden="true">&gt;_</div>
+                <div>Pulse <span>/ OAuth</span></div>
+            </div>
+            <div class="command">
+                <span class="prompt">$</span> pulse auth --provider google<span class="caret" aria-hidden="true"></span>
+            </div>
+            <div class="output">
+                <p class="output-line result"><span class="label">[ok]</span><span>{result_label}</span></p>
+                <p class="output-line"><span class="label">[..]</span><span>{progress_label}</span></p>
+                <p class="output-line next"><span class="label">[-&gt;]</span><span>{safe_title}</span></p>
+            </div>
+            <p class="message"><strong>terminal:</strong> {safe_message}</p>
+        </section>
+    </main>
 </body>
 </html>"""
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
-        self.wfile.write(html.encode("utf-8"))
+        self.wfile.write(page.encode("utf-8"))
 
     def log_message(self, format: str, *args: Any) -> None:
         pass
@@ -360,6 +738,7 @@ def _packaged_google_config() -> dict[str, str]:
         raise AuthConfigurationError("The packaged Google sign-in configuration is invalid.")
     return {
         "client_id": str(parsed.get("client_id", "")).strip(),
+        "client_secret": str(parsed.get("client_secret", "")).strip(),
         "redirect_uri": str(parsed.get("redirect_uri", DEFAULT_REDIRECT_URI)).strip(),
     }
 
@@ -393,6 +772,9 @@ def get_google_config() -> dict[str, str]:
     client_id = os.environ.get(PRODUCT_CLIENT_ID_ENV, "").strip() or packaged.get(
         "client_id", ""
     )
+    client_secret = os.environ.get(PRODUCT_CLIENT_SECRET_ENV, "").strip() or packaged.get(
+        "client_secret", ""
+    )
     redirect_uri = os.environ.get(PRODUCT_REDIRECT_URI_ENV, "").strip() or packaged.get(
         "redirect_uri", DEFAULT_REDIRECT_URI
     )
@@ -404,9 +786,14 @@ def get_google_config() -> dict[str, str]:
         raise AuthConfigurationError(
             "This Pulse installation does not include a valid Google sign-in client."
         )
+    if not _GOOGLE_CLIENT_SECRET.fullmatch(client_secret):
+        raise AuthConfigurationError(
+            "This Pulse installation does not include valid Google Desktop client credentials."
+        )
 
     return {
         "client_id": client_id,
+        "client_secret": client_secret,
         "redirect_uri": _validated_redirect_uri(redirect_uri or DEFAULT_REDIRECT_URI),
     }
 
@@ -444,6 +831,7 @@ def exchange_code_for_tokens(
     data = urllib.parse.urlencode({
         "code": code,
         "client_id": config["client_id"],
+        "client_secret": config["client_secret"],
         "redirect_uri": config["redirect_uri"],
         "grant_type": "authorization_code",
         "code_verifier": code_verifier,
@@ -536,7 +924,7 @@ def revoke_token(token: str) -> bool:
             headers={"Content-Type": "application/x-www-form-urlencoded"},
         )
         with urllib.request.urlopen(req, timeout=10) as resp:
-            return resp.status == 200
+            return int(resp.status) == 200
     except (urllib.error.URLError, OSError, ValueError):
         return False
 
@@ -604,6 +992,7 @@ class AuthenticationManager:
         config = get_google_config()
         data = urllib.parse.urlencode({
             "client_id": config["client_id"],
+            "client_secret": config["client_secret"],
             "refresh_token": tokens.refresh_token,
             "grant_type": "refresh_token",
         }).encode("utf-8")
@@ -650,7 +1039,7 @@ class AuthenticationManager:
         _token_store.store_session(user, updated_tokens)
         return True
 
-    def get_google_config(self) -> dict:
+    def get_google_config(self) -> dict[str, str]:
         return get_google_config()
 
     def get_access_token(self, auto_refresh: bool = True) -> str | None:

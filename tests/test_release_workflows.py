@@ -17,7 +17,12 @@ def test_release_actions_are_immutable_and_attestations_are_authorized() -> None
     assert "scripts/run_provider_e2e.py" in workflow
     assert "scripts/configure_product_oauth.py" in workflow
     assert "scripts/verify_google_oauth_client.py" in workflow
+    assert workflow.index("scripts/verify_google_oauth_client.py") < workflow.index("uv build")
     assert "PULSE_GOOGLE_CLIENT_ID: ${{ vars.PULSE_GOOGLE_CLIENT_ID }}" in workflow
+    assert (
+        "PULSE_GOOGLE_CLIENT_SECRET: ${{ secrets.PULSE_GOOGLE_CLIENT_SECRET }}"
+        in workflow
+    )
     assert "scripts/run_docker_release_tests.py" in workflow
     assert "release-metadata/docker-release.xml" in workflow
     assert "docker-full.xml" not in workflow
@@ -30,6 +35,10 @@ def test_release_actions_are_immutable_and_attestations_are_authorized() -> None
     assert "scripts/run_docker_release_tests.py" in ci_workflow
     assert "scripts/configure_product_oauth.py" in ci_workflow
     assert "PULSE_GOOGLE_CLIENT_ID: ${{ vars.PULSE_GOOGLE_CLIENT_ID }}" in ci_workflow
+    assert (
+        "PULSE_GOOGLE_CLIENT_SECRET: ${{ secrets.PULSE_GOOGLE_CLIENT_SECRET }}"
+        in ci_workflow
+    )
     assert "release-metadata/docker-release.xml" in ci_workflow
     assert "docker-full.xml" not in ci_workflow
     assert "-p no:unraisableexception" in ci_workflow

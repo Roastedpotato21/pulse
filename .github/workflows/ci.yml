@@ -134,6 +134,7 @@ jobs:
       - name: Configure product Google sign-in
         env:
           PULSE_GOOGLE_CLIENT_ID: ${{ vars.PULSE_GOOGLE_CLIENT_ID }}
+          PULSE_GOOGLE_CLIENT_SECRET: ${{ secrets.PULSE_GOOGLE_CLIENT_SECRET }}
         run: uv run python scripts/configure_product_oauth.py
       - run: uv build
       - run: uv run python scripts/verify_release_artifacts.py dist

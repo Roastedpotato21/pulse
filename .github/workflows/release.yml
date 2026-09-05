@@ -47,7 +47,13 @@ jobs:
       - name: Configure product Google sign-in
         env:
           PULSE_GOOGLE_CLIENT_ID: ${{ vars.PULSE_GOOGLE_CLIENT_ID }}
+          PULSE_GOOGLE_CLIENT_SECRET: ${{ secrets.PULSE_GOOGLE_CLIENT_SECRET }}
         run: uv run python scripts/configure_product_oauth.py
+      - name: Verify Google recognizes the Desktop client credentials
+        env:
+          PULSE_GOOGLE_CLIENT_ID: ${{ vars.PULSE_GOOGLE_CLIENT_ID }}
+          PULSE_GOOGLE_CLIENT_SECRET: ${{ secrets.PULSE_GOOGLE_CLIENT_SECRET }}
+        run: uv run python scripts/verify_google_oauth_client.py
       - run: uv build
       - run: >-
           uv run python scripts/verify_release_artifacts.py dist
@@ -100,6 +106,7 @@ jobs:
       - name: Verify release OAuth client with Google
         env:
           PULSE_GOOGLE_CLIENT_ID: ${{ vars.PULSE_GOOGLE_CLIENT_ID }}
+          PULSE_GOOGLE_CLIENT_SECRET: ${{ secrets.PULSE_GOOGLE_CLIENT_SECRET }}
         run: >-
           uv run python scripts/verify_google_oauth_client.py
       - name: Run live provider evaluation

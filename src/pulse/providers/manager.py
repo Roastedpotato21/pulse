@@ -43,11 +43,36 @@ PROVIDER_SPECS: dict[str, ProviderSpec] = {
         display_name="Google Gemini",
         env_var="GEMINI_API_KEY",
         provider_class=GeminiProvider,
-        default_model="gemini-2.0-flash",
+        default_model="gemini-3.6-flash",
         available_models=[
-            ModelMetadata("gemini-2.0-flash", "Fast", "1M", "General & Fast Coding", "Flagship"),
-            ModelMetadata("gemini-1.5-pro", "High Quality", "2M", "Reasoning & Deep Analysis", "Reasoning"),
-            ModelMetadata("gemini-1.5-flash", "Ultra-Fast", "1M", "Lightweight Coding & Speed", "Fast"),
+            ModelMetadata(
+                "gemini-3.6-flash",
+                "Fast",
+                "1M",
+                "Reliable Coding & Agentic Workflows",
+                "Flagship",
+            ),
+            ModelMetadata(
+                "gemini-3.8-flash",
+                "High Quality",
+                "1M",
+                "Software Engineering & Agentic Workflows",
+                "Flagship",
+            ),
+            ModelMetadata(
+                "gemini-3.5-flash",
+                "Fast",
+                "1M",
+                "General Coding & High-Throughput Tasks",
+                "Fast",
+            ),
+            ModelMetadata(
+                "gemini-3.5-flash-lite",
+                "Ultra-Fast",
+                "1M",
+                "Lightweight Coding & High Throughput",
+                "Fast",
+            ),
         ],
     ),
     "openrouter": ProviderSpec(
@@ -55,9 +80,10 @@ PROVIDER_SPECS: dict[str, ProviderSpec] = {
         display_name="OpenRouter",
         env_var="OPENROUTER_API_KEY",
         provider_class=OpenRouterProvider,
-        default_model="qwen/qwen3-coder",
+        default_model="qwen/qwen3-coder:free",
         available_models=[
-            ModelMetadata("qwen/qwen3-coder", "Balanced", "128k", "Advanced Coding & Refactoring", "Coding"),
+            ModelMetadata("qwen/qwen3-coder:free", "Free", "128k", "Advanced Coding & Refactoring", "Coding"),
+            ModelMetadata("qwen/qwen3-coder", "Balanced", "128k", "Paid Coding & Refactoring", "Coding"),
             ModelMetadata("anthropic/claude-3.5-sonnet", "High Quality", "200k", "Architecture & Technical Writing", "Flagship"),
             ModelMetadata("deepseek/deepseek-r1", "High Quality", "164k", "Complex Reasoning & STEM", "Reasoning"),
             ModelMetadata("google/gemini-2.0-flash-001", "Fast", "1M", "Fast Code Generation", "Fast"),
@@ -113,6 +139,16 @@ PROVIDER_SPECS: dict[str, ProviderSpec] = {
             ModelMetadata("deepseek-reasoner", "High Quality", "64k", "Chain-of-Thought Reasoning (R1)", "Reasoning"),
         ],
     ),
+}
+
+
+RETIRED_MODEL_REPLACEMENTS: dict[str, dict[str, str]] = {
+    "gemini": {
+        "gemini-1.5-flash": "gemini-3.6-flash",
+        "gemini-1.5-pro": "gemini-3.6-flash",
+        "gemini-2.0-flash": "gemini-3.6-flash",
+        "gemini-2.0-flash-lite": "gemini-3.5-flash-lite",
+    }
 }
 
 
@@ -201,6 +237,15 @@ class ProviderManager:
             default_spec = PROVIDER_SPECS["openrouter"]
             self.save_selection("openrouter", default_spec.default_model)
             return "openrouter", default_spec.default_model, f"Unknown provider '{provider}'. Switched to openrouter:{default_spec.default_model}."
+
+        replacement = RETIRED_MODEL_REPLACEMENTS.get(provider, {}).get(model.lower())
+        if replacement:
+            warning = (
+                f"Selected model '{model}' has been retired by provider '{provider}'. "
+                f"Switched to '{replacement}'."
+            )
+            self.save_selection(provider, replacement)
+            return provider, replacement, warning
 
         meta = self.get_model_metadata(provider, model)
         if meta and meta.status.lower() == "deprecated":

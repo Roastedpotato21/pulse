@@ -144,11 +144,15 @@ threat boundary.
 ## Release procedure
 
 1. Create a Google OAuth client with application type **Desktop app**. Store its
-   public client ID in the repository Actions variable
-   `PULSE_GOOGLE_CLIENT_ID`. Do not configure or distribute a Web-client secret.
+   client ID in the repository Actions variable `PULSE_GOOGLE_CLIENT_ID` and its
+   accompanying installed-app credential in the repository Actions secret
+   `PULSE_GOOGLE_CLIENT_SECRET`. Google treats installed applications as public
+   clients because distributed apps cannot keep this credential confidential;
+   never substitute a confidential Web-client credential.
 2. Update `CHANGELOG.md`; make version values agree in `pyproject.toml` and
    `pulse.__version__`.
-3. Run the full local release verification and push the commits.
+3. Validate the client with `scripts/verify_google_oauth_client.py`, run the full
+   local release verification, and push the commits.
 4. Wait for required CI checks on the release commit, including live Docker
    security tests.
 5. Confirm the protected `public-beta` and `pypi` environments, provider secret,
@@ -163,4 +167,6 @@ threat boundary.
 The `public-beta` environment requires `OPENAI_API_KEY` and may set
 `PULSE_E2E_MODEL`. The `pypi` environment must match the trusted publisher for
 `.github/workflows/release.yml`. The release build fails before publication when
-`PULSE_GOOGLE_CLIENT_ID` is absent or malformed.
+either OAuth build value is absent or malformed. The Hatch build hook also
+rejects an unconfigured OAuth resource before creating either distribution, so
+never bypass it with an older checkout or upload locally built files directly.

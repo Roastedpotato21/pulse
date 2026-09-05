@@ -1,4 +1,5 @@
 {
   "client_id": "not-configured",
+  "client_secret": "not-configured",
   "redirect_uri": "http://127.0.0.1"
 }

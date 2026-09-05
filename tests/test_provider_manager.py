@@ -38,12 +38,12 @@ def test_save_and_get_active_selection(temp_workspace: Path) -> None:
     # Initial default selection
     prov, model = pm.get_active_selection()
     assert prov == "openrouter"
-    assert model == "qwen/qwen3-coder"
+    assert model == "qwen/qwen3-coder:free"
 
     # Save selection
-    saved_p, saved_m = pm.save_selection("gemini", "gemini-1.5-pro")
+    saved_p, saved_m = pm.save_selection("gemini", "gemini-3.8-flash")
     assert saved_p == "gemini"
-    assert saved_m == "gemini-1.5-pro"
+    assert saved_m == "gemini-3.8-flash"
 
     # Verify JSON persisted
     json_path = temp_workspace / ".agent" / "provider.json"
@@ -52,13 +52,13 @@ def test_save_and_get_active_selection(temp_workspace: Path) -> None:
     assert data == {
         "schema_version": 1,
         "provider": "gemini",
-        "model": "gemini-1.5-pro",
+        "model": "gemini-3.8-flash",
     }
 
     # Read back active selection
     read_p, read_m = pm.get_active_selection()
     assert read_p == "gemini"
-    assert read_m == "gemini-1.5-pro"
+    assert read_m == "gemini-3.8-flash"
 
 
 def test_model_metadata_lookup(temp_workspace: Path) -> None:
@@ -75,8 +75,23 @@ def test_validate_active_selection(temp_workspace: Path) -> None:
     pm = ProviderManager(temp_workspace)
     prov, model, warning = pm.validate_active_selection()
     assert prov == "openrouter"
-    assert model == "qwen/qwen3-coder"
+    assert model == "qwen/qwen3-coder:free"
     assert warning is None
+
+
+def test_validate_active_selection_migrates_retired_gemini_model(
+    temp_workspace: Path,
+) -> None:
+    pm = ProviderManager(temp_workspace)
+    pm.save_selection("gemini", "gemini-1.5-flash")
+
+    provider, model, warning = pm.validate_active_selection()
+
+    assert provider == "gemini"
+    assert model == "gemini-3.6-flash"
+    assert warning is not None
+    assert "retired" in warning
+    assert pm.get_active_selection() == ("gemini", "gemini-3.6-flash")
 
 
 def test_api_key_detection(temp_workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -128,8 +143,8 @@ def test_provider_factory_compatibility(temp_workspace: Path) -> None:
     env_file = temp_workspace / ".env"
 
     providers_to_test = [
-        ("gemini", GeminiProvider, "gemini-2.0-flash"),
-        ("openrouter", OpenRouterProvider, "qwen/qwen3-coder"),
+        ("gemini", GeminiProvider, "gemini-3.6-flash"),
+        ("openrouter", OpenRouterProvider, "qwen/qwen3-coder:free"),
         ("openai", OpenAIProvider, "gpt-4o"),
         ("anthropic", AnthropicProvider, "claude-3-5-sonnet-20241022"),
         ("groq", GroqProvider, "llama-3.3-70b-versatile"),

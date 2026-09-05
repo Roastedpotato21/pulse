@@ -11,13 +11,13 @@ from scripts.generate_release_metadata import generate_metadata
 
 
 def _release_files(directory: Path) -> None:
-    wheel = directory / "pulse_coding_agent-0.1.1-py3-none-any.whl"
+    wheel = directory / "pulse_coding_agent-0.1.2-py3-none-any.whl"
     with zipfile.ZipFile(wheel, mode="w") as archive:
         archive.writestr(
-            "pulse_coding_agent-0.1.1.dist-info/METADATA",
+            "pulse_coding_agent-0.1.2.dist-info/METADATA",
             "Metadata-Version: 2.4\n"
             "Name: pulse-coding-agent\n"
-            "Version: 0.1.1\n"
+            "Version: 0.1.2\n"
             "Requires-Dist: httpx==0.28.1\n"
             "Requires-Dist: keyring==25.7.0\n"
             "Requires-Dist: openai==2.44.0\n"
@@ -27,7 +27,7 @@ def _release_files(directory: Path) -> None:
             "Requires-Dist: websockets==16.1\n",
         )
         archive.writestr(
-            "pulse_coding_agent-0.1.1.dist-info/entry_points.txt",
+            "pulse_coding_agent-0.1.2.dist-info/entry_points.txt",
             "[console_scripts]\npulse = pulse.cli:main\npulse-rpc = pulse.rpc:main\npulse-remote = pulse.sandbox.remote.server:main\n",
         )
         archive.writestr(
@@ -35,16 +35,17 @@ def _release_files(directory: Path) -> None:
             json.dumps(
                 {
                     "client_id": "123456789012-release.apps.googleusercontent.com",
+                    "client_secret": "GOCSPX-abcdefghijklmnopqrstuvwxyz123456",
                     "redirect_uri": "http://127.0.0.1",
                 }
             ),
         )
     with tarfile.open(
-        directory / "pulse_coding_agent-0.1.1.tar.gz", mode="w:gz"
+        directory / "pulse_coding_agent-0.1.2.tar.gz", mode="w:gz"
     ) as archive:
         readme = directory / "README.md"
         readme.write_text("Pulse", encoding="utf-8")
-        archive.add(readme, arcname="pulse_coding_agent-0.1.1/README.md")
+        archive.add(readme, arcname="pulse_coding_agent-0.1.2/README.md")
         readme.unlink()
 
 
@@ -57,15 +58,15 @@ def test_release_metadata_binds_hashes_to_source_commit(tmp_path: Path) -> None:
     manifest = generate_metadata(distributions, metadata, "a" * 40)
 
     assert manifest["source_commit"] == "a" * 40
-    assert manifest["version"] == "0.1.1"
+    assert manifest["version"] == "0.1.2"
     assert len(manifest["artifacts"]) == 2
     saved = json.loads(
         (metadata / "release-manifest.json").read_text(encoding="utf-8")
     )
     assert saved == manifest
     checksums = (metadata / "SHA256SUMS").read_text(encoding="utf-8")
-    assert "pulse_coding_agent-0.1.1-py3-none-any.whl" in checksums
-    assert "pulse_coding_agent-0.1.1.tar.gz" in checksums
+    assert "pulse_coding_agent-0.1.2-py3-none-any.whl" in checksums
+    assert "pulse_coding_agent-0.1.2.tar.gz" in checksums
 
 
 def test_release_metadata_rejects_abbreviated_commit(tmp_path: Path) -> None:

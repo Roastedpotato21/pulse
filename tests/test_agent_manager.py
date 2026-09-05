@@ -16,8 +16,9 @@ from pulse.agent_manager import (
     TaskCategory,
     TestingAgent,
 )
+from pulse.providers.base import ProviderRequestError
 from pulse.streaming import CancellationToken, StreamEvent, StreamEventType
-from pulse.task_manager import Task, TaskStatus
+from pulse.task_manager import Task, TaskManager, TaskStatus
 
 
 class MockCollaborationAgent(CollaborationAgent):
@@ -134,6 +135,39 @@ def test_agent_manager_run_response(mock_task_manager):
         
         # The run result should be exactly the agent's message, not the system context
         assert result.final_response == "This is the generated explanation."
+
+    asyncio.run(run_test())
+
+
+def test_agent_manager_surfaces_non_retryable_provider_failure_without_stale_answer(
+    tmp_path,
+):
+    class BillingFailureAgent(CollaborationAgent):
+        def __init__(self):
+            self.name = "Responder"
+            self.capabilities = [TaskCategory.GENERAL]
+
+        async def execute(self, task, shared_context, token):
+            message = (
+                "Model request failed (openrouter HTTP 402): "
+                "The openrouter account has insufficient credits or paid-model access."
+            )
+            yield StreamEvent(event_type=StreamEventType.TOOL_FAILED, content=message)
+            raise ProviderRequestError(message, status_code=402, retryable=False)
+
+    async def run_test():
+        task_manager = TaskManager(tmp_path)
+        manager = AgentManager(task_manager=task_manager, agents=[BillingFailureAgent()])
+        manager.shared_context.post_message(
+            AgentMessage("Responder", None, TaskCategory.GENERAL, "stale answer")
+        )
+
+        with pytest.raises(RuntimeError, match="HTTP 402"):
+            await manager.run("Explain an API", [])
+
+        failed = task_manager.list_tasks(status=TaskStatus.DEAD_LETTER)
+        assert len(failed) == 1
+        assert failed[0].retries == 1
 
     asyncio.run(run_test())
 

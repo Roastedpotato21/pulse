@@ -22,7 +22,7 @@ def test_release_tag_version_normalization() -> None:
 def test_readme_uses_the_distribution_name_for_pip_installation() -> None:
     readme = Path("README.md").read_text(encoding="utf-8")
 
-    assert "python -m pip install pulse-coding-agent==0.1.1" in readme
+    assert "python -m pip install pulse-coding-agent==0.1.2" in readme
     assert "Do not run `pip install pulse`" in readme
 
 
@@ -99,24 +99,38 @@ def test_release_artifact_requires_configured_public_oauth_client(tmp_path: Path
     with zipfile.ZipFile(wheel, mode="w") as archive:
         archive.writestr(
             "pulse/_product_oauth.json",
-            '{"client_id":"not-configured","redirect_uri":"http://127.0.0.1"}',
+            '{"client_id":"not-configured","client_secret":"not-configured",'
+            '"redirect_uri":"http://127.0.0.1"}',
         )
 
     with pytest.raises(ValueError, match="placeholder Google OAuth client ID"):
         _validate_public_oauth_config(wheel)
 
 
-def test_release_artifact_rejects_oauth_secret_field(tmp_path: Path) -> None:
+def test_release_artifact_rejects_invalid_desktop_oauth_credential(tmp_path: Path) -> None:
     wheel = tmp_path / "invalid.whl"
     with zipfile.ZipFile(wheel, mode="w") as archive:
         archive.writestr(
             "pulse/_product_oauth.json",
             '{"client_id":"123456789012-release.apps.googleusercontent.com",'
-            '"client_secret":"must-not-ship","redirect_uri":"http://127.0.0.1"}',
+            '"client_secret":"invalid","redirect_uri":"http://127.0.0.1"}',
         )
 
-    with pytest.raises(ValueError, match="configuration fields"):
+    with pytest.raises(ValueError, match="missing Google Desktop OAuth credential"):
         _validate_public_oauth_config(wheel)
+
+
+def test_release_artifact_accepts_desktop_oauth_credentials(tmp_path: Path) -> None:
+    wheel = tmp_path / "valid.whl"
+    with zipfile.ZipFile(wheel, mode="w") as archive:
+        archive.writestr(
+            "pulse/_product_oauth.json",
+            '{"client_id":"123456789012-release.apps.googleusercontent.com",'
+            '"client_secret":"GOCSPX-abcdefghijklmnopqrstuvwxyz123456",'
+            '"redirect_uri":"http://127.0.0.1"}',
+        )
+
+    _validate_public_oauth_config(wheel)
 
 
 def test_release_artifact_rejects_internal_home_paths() -> None:
@@ -133,3 +147,14 @@ def test_release_artifact_rejects_high_confidence_secret_material() -> None:
             Path("artifact.whl"),
             [("module.py", b"token = 'GOCSPX-abcdefghijklmnopqrstuvwxyz123456'")],
         )
+
+
+def test_release_artifact_allows_desktop_credential_only_in_product_config() -> None:
+    credential = b"GOCSPX-abcdefghijklmnopqrstuvwxyz123456"
+
+    _validate_content(
+        Path("artifact.whl"),
+        [("pulse/_product_oauth.json", credential)],
+    )
+    with pytest.raises(ValueError, match="secret material"):
+        _validate_content(Path("artifact.whl"), [("pulse/other.py", credential)])
